@@ -1,0 +1,38 @@
+name: Feature request
+description: Something Vega should be able to do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What were you trying to do
+      description: |
+        The situation, not the solution. Feature requests that describe the
+        problem tend to get better answers than ones that describe a design.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+    validations:
+      required: true
+
+  - type: textarea
+    id: cost
+    attributes:
+      label: What it would cost
+      description: |
+        Every tier of this system trades something away — usually privacy,
+        battery, or the ability to work with no infrastructure. If your idea has
+        a cost, naming it yourself makes the discussion much shorter.
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Does this hold
+      options:
+        - label: It works without any server that I would have to run
+        - label: It does not let a relay or mailbox peer learn who is talking to whom
+        - label: I am not sure — happy to discuss

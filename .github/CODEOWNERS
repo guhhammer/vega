@@ -1,0 +1,8 @@
+# Everything, by default.
+*                       @guhhammer
+
+# Cryptography and the transport. Changes here can break confidentiality or
+# authentication without failing a test, so they always want a second read.
+/crates/vega-core/      @guhhammer
+/crates/vega-net/       @guhhammer
+/app/src-tauri/         @guhhammer

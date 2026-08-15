@@ -1,0 +1,54 @@
+# Build speed, without changing what gets produced.
+#
+# The two settings that matter most for a dependency tree this size are debug
+# info and linking. libp2p alone is several hundred crates, and a debug build
+# spends more time writing DWARF and relinking than it does type-checking.
+#
+# Measure before adding anything here: `cargo build --timings` writes a report
+# to target/cargo-timings that shows exactly which crates dominate.
+
+[build]
+# Keep intermediate artifacts around between builds. On by default for dev
+# profiles; stated explicitly so it survives a CARGO_INCREMENTAL in the env.
+incremental = true
+
+[profile.dev]
+# Full DWARF for ~400 dependencies is the single largest cost in a debug build,
+# and almost none of it is ever read. Line tables still give usable backtraces
+# and panic locations, which is what a test run actually needs.
+debug = "line-tables-only"
+
+# Leave debug info in the object files instead of copying it into the binary at
+# link time. Cuts link time noticeably and costs nothing else on Linux.
+split-debuginfo = "unpacked"
+
+[profile.test]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+# `cargo build --profile quick` — an optimized build that links fast.
+# For when you want to run the app at a sensible speed without paying for
+# fat LTO and a single codegen unit.
+[profile.quick]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug = "line-tables-only"
+strip = "none"
+
+# --- optional, not enabled by default ---------------------------------------
+#
+# A faster linker is the next big win, but it has to be installed first, and a
+# missing one turns every build into a hard error rather than a slow one. So it
+# stays commented: uncomment after `apt install mold`.
+#
+# [target.x86_64-unknown-linux-gnu]
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+#
+# sccache caches compiled crates across checkouts and branches. It is installed
+# on this machine but not enabled globally, because it interacts badly with
+# `cargo fix` and with any workflow that rewrites source mid-build.
+#
+# [build]
+# rustc-wrapper = "sccache"

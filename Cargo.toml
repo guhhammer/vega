@@ -1,0 +1,53 @@
+[workspace]
+members = ["crates/vega-core", "crates/vega-net", "app/src-tauri"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Gustavo Hammerschmidt"]
+license = "MIT"
+
+[workspace.dependencies]
+vega-core = { path = "crates/vega-core" }
+vega-net = { path = "crates/vega-net" }
+
+# crypto
+vodozemac = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+blake3 = "1"
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+
+# encoding
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+data-encoding = "2"
+
+# storage
+redb = "3"
+
+# async
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+futures = "0.3"
+
+# diagnostics
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# The dev profile builds the crypto crates optimized: unoptimized curve25519 and
+# blake3 make the test suite roughly an order of magnitude slower, which is the
+# difference between a test run you wait on and one you skip.
+[profile.dev.package."*"]
+opt-level = 2

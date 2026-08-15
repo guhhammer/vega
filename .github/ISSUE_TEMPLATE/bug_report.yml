@@ -1,0 +1,64 @@
+name: Bug report
+description: Something behaves differently from what the docs say it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this is a security problem, close this and use
+        [private reporting](https://github.com/guhhammer/vega/security/advisories/new)
+        instead. A public issue tells everyone including the attacker.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: And what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce
+      placeholder: |
+        1. Start the app on two machines on the same wifi
+        2. Paste the invite from one into the other
+        3. Send a message
+        4. Nothing arrives
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Where does it happen
+      options:
+        - On one machine
+        - Between two machines on the same network
+        - Between two machines on different networks
+        - While building or testing
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Run with `RUST_LOG=vega_app=debug,vega_net=debug ./make dev` and paste
+        what appears around the failure. Log lines contain account ids — trim
+        anything you do not want public.
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: git rev-parse --short HEAD
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: Debian 13, Rust 1.97

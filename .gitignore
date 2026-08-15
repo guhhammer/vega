@@ -1,16 +1,20 @@
-
 .todo
 .references
 
 /target
-Cargo.lock
+node_modules/
+app/dist/
+app/src-tauri/gen/
 
 logs/
-node_modules/
 
 .env
 .env.*
 !.env.example
 
-*.txt
 *.swp
+.DS_Store
+
+# Cargo.lock is committed on purpose: this repo builds applications, not a
+# library, and a reproducible dependency set is part of what a messenger's
+# users are trusting.

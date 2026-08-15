@@ -1,0 +1,47 @@
+name: audit
+
+# A messenger's dependency tree is part of its attack surface, so advisories
+# are checked on a clock rather than only when something changes.
+on:
+  push:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+  schedule:
+    # Weekly. An advisory published on Tuesday should not wait for the next
+    # unrelated commit to be noticed.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  npm:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      # The frontend has no network access of its own — it talks only to the
+      # Rust side — so a moderate advisory there is not an emergency.
+      - run: npm audit --audit-level=high
