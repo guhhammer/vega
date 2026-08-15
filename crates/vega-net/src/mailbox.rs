@@ -244,13 +244,23 @@ mod tests {
     fn one_tag_cannot_grow_without_bound() {
         let mut m = Mailbox::new();
         for i in 0..MAX_PARKED_PER_TAG + 20 {
-            m.park(tag(1), token(1), vec![i as u8], NOW + 60, NOW, MAX);
+            m.park(
+                tag(1),
+                token(1),
+                vec![u8::try_from(i % 256).unwrap()],
+                NOW + 60,
+                NOW,
+                MAX,
+            );
         }
         assert_eq!(m.len(), MAX_PARKED_PER_TAG);
         // The most recent messages are the ones kept.
         let got = m.collect(&[(tag(1), token(1))], NOW);
         assert_eq!(got.len(), MAX_PARKED_PER_TAG);
-        assert_eq!(got.last().unwrap()[0], (MAX_PARKED_PER_TAG + 19) as u8);
+        assert_eq!(
+            got.last().unwrap()[0],
+            u8::try_from((MAX_PARKED_PER_TAG + 19) % 256).unwrap()
+        );
     }
 
     #[test]

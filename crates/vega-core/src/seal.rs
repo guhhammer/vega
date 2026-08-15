@@ -50,7 +50,7 @@ fn aad(ephemeral: &XPublic, recipient: &XPublic, context: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(64 + context.len());
     v.extend_from_slice(ephemeral.as_bytes());
     v.extend_from_slice(recipient.as_bytes());
-    v.extend_from_slice(&(context.len() as u32).to_be_bytes());
+    v.extend_from_slice(&(context.len() as u64).to_be_bytes());
     v.extend_from_slice(context);
     v
 }

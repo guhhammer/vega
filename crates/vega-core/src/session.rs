@@ -137,13 +137,16 @@ impl Sessions {
             .encrypt(&plaintext)
             .map_err(|e| Error::Wire(e.to_string()))?;
         let (olm_type, olm_ct) = olm.to_parts();
+        // 0 or 1 in practice, but the type says usize; refuse rather than wrap.
+        let olm_type = u8::try_from(olm_type)
+            .map_err(|_| Error::Wire("olm message type out of range".into()))?;
 
         let inner = Inner {
             from_account: identity.account_id,
             from_device: identity.device_id,
             from_olm: identity.olm.curve25519_key().into(),
             to_device: peer.device_id,
-            olm_type: olm_type as u8,
+            olm_type,
             olm_ct,
         };
 
@@ -572,7 +575,7 @@ mod tests {
             from_device: alice.identity.device_id,
             from_olm: eve.identity.olm.curve25519_key().into(),
             to_device: bob_device.device_id,
-            olm_type: olm_type as u8,
+            olm_type: u8::try_from(olm_type).unwrap(),
             olm_ct,
         };
 
@@ -632,7 +635,7 @@ mod tests {
             from_device: alice.identity.device_id,
             from_olm: eve.identity.olm.curve25519_key().into(),
             to_device: bob_device.device_id,
-            olm_type: olm_type as u8,
+            olm_type: u8::try_from(olm_type).unwrap(),
             olm_ct,
         };
         let sealed = seal::seal(

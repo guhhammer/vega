@@ -28,8 +28,13 @@ impl Writer {
     }
 
     /// Length-prefixed bytes. The prefix is what makes the encoding injective.
+    ///
+    /// The prefix is `u64` rather than `u32` so there is no length at which it
+    /// could truncate. A truncated prefix would make two different field
+    /// sequences encode identically, which is exactly the collision the prefix
+    /// exists to prevent — and it would do so silently, inside a signature.
     pub fn bytes(&mut self, v: &[u8]) -> &mut Self {
-        self.0.extend_from_slice(&(v.len() as u32).to_be_bytes());
+        self.0.extend_from_slice(&(v.len() as u64).to_be_bytes());
         self.0.extend_from_slice(v);
         self
     }
