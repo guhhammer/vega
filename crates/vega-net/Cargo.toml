@@ -1,0 +1,51 @@
+[package]
+name = "vega-net"
+description = "The transport ladder: LAN discovery, DHT rendezvous, hole punching, relay."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+vega-core.workspace = true
+
+libp2p = { version = "0.56", features = [
+    "tokio",
+    "macros",
+    # transports — QUIC first, TCP as the fallback for networks that block UDP
+    "quic",
+    "tcp",
+    "dns",
+    "noise",
+    "yamux",
+    # T0: same LAN
+    "mdns",
+    # T1: direct across the internet
+    "autonat",
+    "upnp",
+    "dcutr",
+    # T2: rendezvous
+    "kad",
+    # T3: relayed
+    "relay",
+    # housekeeping + our own message protocol
+    "identify",
+    "ping",
+    "request-response",
+    "cbor",
+] }
+
+tokio.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rand.workspace = true
+chacha20poly1305.workspace = true
+data-encoding.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
