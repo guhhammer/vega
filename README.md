@@ -6,7 +6,8 @@ ciphertext, and hold each other's mail.
 Nothing here is a service you have to run or pay for, no node can read a message,
 and no node's disappearance kills the network. The full design, including what
 that does *not* protect against, is in
-[the design document](https://claude.ai/code/artifact/55208dd3-3049-42ef-a923-da62b1a9f61a).
+[`.documentation/design.md`](.documentation/design.md) — also published as an
+[artifact](https://claude.ai/code/artifact/55208dd3-3049-42ef-a923-da62b1a9f61a).
 
 ## Layout
 
@@ -78,7 +79,8 @@ key that can read anything, and cannot withhold a message it never sees.
 
 ## Security notes
 
-Read the design document's non-goals section before trusting this with anything.
+Read the [design document's](.documentation/design.md) non-goals section before
+trusting this with anything.
 **Nothing here has been audited.** vodozemac (the ratchet) has been; the code
 around it has not.
 

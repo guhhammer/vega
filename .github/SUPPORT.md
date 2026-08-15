@@ -34,9 +34,10 @@ Work down the ladder:
 
 ## Understanding the design
 
-Start with the [README](../README.md), then the design document it links. The
-design says what the system does *not* protect against as clearly as what it
-does; read that part before trusting it with anything.
+Start with the [README](../README.md), then
+[the design document](../.documentation/design.md). It says what the system does
+*not* protect against as clearly as what it does; read that part before trusting
+it with anything.
 
 ## Asking for a feature
 
