@@ -1,0 +1,17 @@
+# Normalise line endings so a Windows checkout does not produce a diff on every
+# file the first time someone saves.
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.icns binary
+
+# Generated, and enormous. Collapsing them keeps a pull request reviewable —
+# a lockfile change is worth *noticing*, not worth reading line by line.
+Cargo.lock        linguist-generated=true -diff
+app/package-lock.json linguist-generated=true -diff
+
+# GitHub's language stats otherwise report this project as mostly JSON.
+.documentation/** linguist-documentation=true
+done/**           linguist-documentation=true
+*.md              linguist-documentation=true

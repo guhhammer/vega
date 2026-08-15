@@ -1,0 +1,26 @@
+# Vega uses four spaces in Rust and two everywhere else, which is what rustfmt
+# and prettier already do. This file just stops an editor from disagreeing
+# before either of them runs.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.rs]
+indent_size = 4
+# rustfmt's default. Comments in this codebase carry reasoning, so the limit is
+# about keeping them readable, not about fitting code on a line.
+max_line_length = 100
+
+[*.md]
+# Two trailing spaces are a hard line break in Markdown.
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab

@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: If you reference Vega in written work, please cite it as below.
+title: "Vega: an encrypted messenger with no server"
+abstract: >-
+  A peer-to-peer encrypted messenger with no server component. Identity is
+  self-certifying — an account id is the hash of an Ed25519 public key — and
+  device rosters are published as hash-linked signed logs that any contact
+  verifies offline. Messages use the Olm double ratchet inside a sealed-sender
+  layer, and travel over a ladder of transports that degrades from the local
+  network through DHT rendezvous and peer relaying to offline mailboxes, with no
+  node able to read what it carries.
+type: software
+license: MIT
+repository-code: https://github.com/guhhammer/vega
+authors:
+  - alias: guhhammer
+    family-names: Hammerschmidt
+    given-names: Gustavo
+keywords:
+  - end-to-end encryption
+  - peer-to-peer
+  - decentralised
+  - messaging
+  - libp2p
+  - double ratchet
