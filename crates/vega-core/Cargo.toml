@@ -1,0 +1,30 @@
+[package]
+name = "vega-core"
+description = "Identity, sigchain and message cryptography for Vega. No networking."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+vodozemac.workspace = true
+x25519-dalek.workspace = true
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+blake3.workspace = true
+rand.workspace = true
+zeroize.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+data-encoding.workspace = true
+
+redb.workspace = true
+
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
