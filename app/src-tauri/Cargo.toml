@@ -1,0 +1,36 @@
+[package]
+name = "vega-app"
+description = "Vega — an encrypted messenger with no server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+# The `_lib` suffix keeps the library name distinct from the binary, which
+# otherwise collides on Windows. Tauri's mobile targets link against this.
+name = "vega_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+vega-core.workspace = true
+vega-net.workspace = true
+
+tauri = { version = "2", features = [] }
+
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rand.workspace = true
+data-encoding.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
