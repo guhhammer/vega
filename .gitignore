@@ -1,0 +1,16 @@
+
+.todo
+.references
+
+/target
+Cargo.lock
+
+logs/
+node_modules/
+
+.env
+.env.*
+!.env.example
+
+*.txt
+*.swp
