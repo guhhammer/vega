@@ -7,7 +7,7 @@
 //! distinct field sequences can produce the same bytes.
 
 /// Append-only canonical writer.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Writer(Vec<u8>);
 
 impl Writer {

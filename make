@@ -10,6 +10,7 @@
 #   ./make dist     build a real installer
 #   ./make android  build the Android APK
 #   ./make node     run a headless relay/mailbox/bootstrap node
+#   ./make clean    delete build artifacts
 #   ./make all      fmt, check, dist
 #
 # `cargo build` on its own leaves binaries that are proof the code compiles, not
@@ -60,6 +61,15 @@ case "${1:-check}" in
   node)
     shift
     cargo run --release -p vega-net --example seed -- "$@"
+    ;;
+
+  clean)
+    # target/ passes 10GB quickly once a few profiles have been built — debug,
+    # test, release and the Tauri bundle each keep their own copy of ~400
+    # dependencies. Worth knowing before it fills a disk.
+    echo "removing $(du -sh target 2>/dev/null | cut -f1 || echo 0) of build artifacts"
+    cargo clean
+    rm -rf app/dist app/src-tauri/gen
     ;;
 
   all)

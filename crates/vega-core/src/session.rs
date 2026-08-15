@@ -30,7 +30,7 @@ fn olm_session_config() -> SessionConfig {
 ///
 /// A device can legitimately have more than one session with the same peer —
 /// both sides may open one simultaneously — so decryption tries each in turn.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Sessions {
     by_device: HashMap<DeviceId, Vec<Peered>>,
 }
@@ -45,6 +45,16 @@ pub struct Sessions {
 pub struct Peered {
     pub session: Session,
     pub remote: DhKey,
+}
+
+impl std::fmt::Debug for Peered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The session holds ratchet state. Print who it talks to, never its keys.
+        f.debug_struct("Peered")
+            .field("remote", &self.remote)
+            .field("session_id", &self.session.session_id())
+            .finish()
+    }
 }
 
 impl Sessions {
@@ -296,6 +306,7 @@ pub struct Opened {
 
 /// Everything needed to address one contact: their verified device roster and
 /// the pairwise secret shared with them.
+#[derive(Debug)]
 pub struct Recipient<'a> {
     pub account: AccountId,
     pub state: &'a ChainState,

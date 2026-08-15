@@ -9,6 +9,9 @@ use libp2p::{
 };
 use std::time::Duration;
 
+// The derive generates the event enum; Debug on the behaviour itself would mean
+// printing every sub-behaviour's internal state, which is neither useful nor
+// small. A short summary is what anyone actually wants in a log.
 #[derive(NetworkBehaviour)]
 pub struct Vega {
     /// T0 — same LAN. The only discovery that works with no internet at all.
@@ -122,6 +125,16 @@ impl Vega {
             ),
             ping: ping::Behaviour::default(),
         })
+    }
+}
+
+impl std::fmt::Debug for Vega {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Vega")
+            .field("mdns", &self.mdns.is_enabled())
+            .field("relay_server", &self.relay.is_enabled())
+            .field("upnp", &self.upnp.is_enabled())
+            .finish_non_exhaustive()
     }
 }
 

@@ -103,7 +103,7 @@ enum Command {
 }
 
 /// Cheap, cloneable handle to the running node.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NodeHandle {
     tx: mpsc::Sender<Command>,
 }
@@ -218,6 +218,19 @@ pub struct Node {
     events: mpsc::Sender<NetEvent>,
     pending: HashMap<OutboundRequestId, Pending>,
     queries: HashMap<QueryId, Query>,
+}
+
+impl std::fmt::Debug for Node {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `Swarm` has no Debug, and printing every in-flight query would be
+        // noise anyway. Counts are what a stuck node looks like.
+        f.debug_struct("Node")
+            .field("peer_id", self.swarm.local_peer_id())
+            .field("mailbox", &self.mailbox.len())
+            .field("pending_requests", &self.pending.len())
+            .field("pending_queries", &self.queries.len())
+            .finish()
+    }
 }
 
 impl Node {

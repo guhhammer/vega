@@ -9,6 +9,24 @@ rust-version = "1.85"
 authors = ["Gustavo Hammerschmidt"]
 license = "MIT"
 
+# Lints live here rather than in RUSTFLAGS so they apply the same way to
+# `cargo check`, rustdoc, and an editor's rust-analyzer — which RUSTFLAGS does
+# not, and the resulting disagreement is a good way to waste an afternoon.
+[workspace.lints.rust]
+# There is no unsafe in this workspace and there is no plausible reason for any.
+# `forbid` means a future contributor cannot re-enable it with an attribute.
+unsafe_code = "forbid"
+unused_qualifications = "warn"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+# Both mean "unfinished" and neither belongs in a messenger someone runs.
+todo = "deny"
+dbg_macro = "deny"
+# Silently truncating an integer in code that computes buffer sizes and key
+# lengths is how memory bugs get written in safe Rust.
+cast_possible_truncation = "warn"
+
 [workspace.dependencies]
 vega-core = { path = "crates/vega-core" }
 vega-net = { path = "crates/vega-net" }

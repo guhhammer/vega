@@ -49,3 +49,6 @@ data-encoding.workspace = true
 [dev-dependencies]
 tracing-subscriber.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+
+[lints]
+workspace = true

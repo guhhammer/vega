@@ -1,0 +1,16 @@
+# Pinned so that everyone — and CI — compiles with the same rustc.
+#
+# It also makes the CI cache useful: a floating "stable" invalidates the whole
+# dependency cache every six weeks when a new release lands, which for a tree
+# this size is the difference between a two-minute job and a twenty-minute one.
+#
+# Bump deliberately, in its own commit, with `./make check` run afterwards.
+
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]
+targets = [
+  "aarch64-linux-android",
+  "armv7-linux-androideabi",
+  "x86_64-linux-android",
+]

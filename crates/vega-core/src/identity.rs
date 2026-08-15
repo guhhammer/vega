@@ -365,6 +365,8 @@ impl Identity {
 /// secrets are stored beside it. Custody of `pickle_key` is deliberately the
 /// caller's problem — on a real install it comes from the platform keystore,
 /// never from a file next to the database.
+/// Debug is deliberately not derived: the fields are encrypted key material and
+/// a stray `{:?}` in a log should not be the thing that leaks them.
 #[derive(Serialize, Deserialize)]
 pub struct IdentityPickle {
     olm: String,
@@ -412,6 +414,15 @@ impl Identity {
             seal,
             label: p.label.clone(),
         })
+    }
+}
+
+impl fmt::Debug for IdentityPickle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IdentityPickle")
+            .field("account_id", &self.account_id)
+            .field("label", &self.label)
+            .finish_non_exhaustive()
     }
 }
 

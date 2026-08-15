@@ -28,7 +28,7 @@ struct Ctx {
 
 // ---------------------------------------------------------------- views
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct MeView {
     account_id: String,
     short_id: String,
@@ -36,7 +36,7 @@ pub struct MeView {
     device_id: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ContactView {
     account_id: String,
     short_id: String,
@@ -45,7 +45,7 @@ pub struct ContactView {
     safety_number: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct MessageView {
     id: String,
     text: String,
@@ -53,7 +53,7 @@ pub struct MessageView {
     at: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct NetworkView {
     peer_id: String,
     listeners: Vec<String>,

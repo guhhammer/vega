@@ -45,7 +45,7 @@ pub struct Contact {
 }
 
 /// One Olm session at rest.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct StoredSession {
     /// vodozemac's own encrypted pickle.
     pickle: String,
@@ -78,6 +78,13 @@ pub struct OutboxItem {
 
 pub struct Store {
     db: Database,
+}
+
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Everything inside is either encrypted or somebody's message history.
+        f.write_str("Store(<opaque>)")
+    }
 }
 
 impl Store {
@@ -367,7 +374,7 @@ impl Store {
 mod tests {
     use super::*;
     use crate::envelope::Body;
-    use crate::sigchain::Body as ChainBody;
+    use crate::sigchain::{Body as ChainBody, Sigchain};
 
     const NOW: u64 = 1_755_000_000;
 
@@ -407,7 +414,7 @@ mod tests {
     fn an_invalid_chain_is_never_written() {
         let (store, _dir) = store();
         let identity = Identity::create("laptop");
-        let mut chain = crate::sigchain::Sigchain::genesis(&identity, "me", NOW).unwrap();
+        let mut chain = Sigchain::genesis(&identity, "me", NOW).unwrap();
         chain
             .append_signed_by_root(
                 &identity,
@@ -418,7 +425,7 @@ mod tests {
         store.save_chain(&identity.account_id, &chain).unwrap();
         assert!(store.load_chain(&identity.account_id).unwrap().is_some());
 
-        let empty = crate::sigchain::Sigchain::default();
+        let empty = Sigchain::default();
         assert!(store.save_chain(&identity.account_id, &empty).is_err());
         // The good chain is still there.
         assert_eq!(
