@@ -33,10 +33,10 @@ vega-net = { path = "crates/vega-net" }
 
 # crypto
 vodozemac = "0.10"
-x25519-dalek = { version = "2", features = ["static_secrets"] }
-chacha20poly1305 = "0.10"
-hkdf = "0.12"
-sha2 = "0.10"
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+chacha20poly1305 = "0.11"
+hkdf = "0.13"
+sha2 = "0.11"
 blake3 = "1"
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
