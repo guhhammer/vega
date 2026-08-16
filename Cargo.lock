@@ -6215,7 +6215,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vega-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "blake3",
  "data-encoding",
@@ -6236,7 +6236,7 @@ dependencies = [
 
 [[package]]
 name = "vega-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -6257,7 +6257,7 @@ dependencies = [
 
 [[package]]
 name = "vega-net"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chacha20poly1305",
  "data-encoding",

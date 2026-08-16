@@ -4,8 +4,66 @@ Notable changes, newest first. Per-commit reasoning lives in [`done/`](done/);
 this file is the summary you would read before upgrading.
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions follow [semver](https://semver.org), with the pre-1.0 caveat that the
-wire format is not yet stable and may break between releases.
+Versions follow [semver](https://semver.org). **The wire format is still not
+stable** and may break between releases — the version number tracks the
+application, not a protocol guarantee, and two different builds may not talk to
+each other.
+
+## [1.0.0] — 2026-08-16
+
+A packaging and distribution release. The protocol, crypto and transport code
+are unchanged from 0.1.0; what changed is that there is now something to
+download and instructions for using it.
+
+**Nothing here has been audited.** That was true at 0.1.0 and it is still true —
+read [SECURITY.md](SECURITY.md) and the
+[threat model](.documentation/threat-model.md) before trusting this with
+anything that matters. A 1.0 version number is not a review.
+
+### Added
+
+- **Installers for Linux, macOS and Windows**, attached to every tagged release
+  under names that do not change between versions, so a download link written
+  once keeps working: `Vega-linux-x86_64.AppImage`, `Vega-linux-amd64.deb`,
+  `Vega-macos-universal.dmg`, `Vega-windows-x86_64-setup.exe`. The macOS build
+  is universal, so there is one download for Intel and Apple silicon.
+- **`SHA256SUMS.txt`** on each release, covering every artifact. Neither the
+  macOS nor the Windows build is signed, so a checksum you check against a
+  second source is worth more than the warning the operating system shows.
+- **[Installation instructions](.documentation/installing.md)** — per-platform
+  steps, how to get past the Gatekeeper and SmartScreen warnings, where the
+  account data lives, and the fact that deleting that directory destroys the
+  account with no recovery.
+- **A complete icon set.** Only a single PNG was present, so the Windows and
+  macOS bundles could not have been built at all — those bundlers require
+  `.ico` and `.icns` respectively.
+- **Bundle metadata**: category, publisher, homepage, licence and descriptions,
+  which is what makes the `.deb` declare its WebKit and GTK dependencies so
+  `apt` resolves them.
+
+### Changed
+
+- **`./make dist` stages what it builds** into `release/`, under the same names
+  the release workflow uploads and with a `SHA256SUMS.txt` beside them, so a
+  locally built installer and a released one are interchangeable.
+- **The release workflow creates its draft release once**, in a job of its own,
+  before any platform build starts. Previously all three build jobs raced to
+  create it, which duplicates the release or fails two of the three. It also now
+  verifies the tag against every file carrying the version before spending three
+  runners on a build whose file names would contradict it.
+
+### Fixed
+
+- **A development build launched on its own now says so.** Running
+  `cargo run`, or the binary in `target/debug/`, starts the Rust half correctly
+  and then opens a window on "Could not connect to localhost", because a dev
+  build loads its frontend from the vite dev server rather than containing it.
+  The port is now checked at startup and the reason printed, with the two
+  commands that do work. Release builds embed the frontend and are unaffected.
+- **The nightly `rustdoc` and `unused-deps` jobs** never ran: both compile the
+  desktop crate, which links against the system webview, and neither installed
+  it. They failed in `pkg-config` before reaching the thing they were meant to
+  check.
 
 ## [0.1.0] — 2026-08-15
 
