@@ -26,6 +26,26 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png"]
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "SocialNetworking",
+    "publisher": "Gustavo Hammerschmidt",
+    "homepage": "https://github.com/guhhammer/vega",
+    "license": "MIT",
+    "shortDescription": "An encrypted messenger with no server.",
+    "longDescription": "Vega is an encrypted messenger with no server. Peers find each other, carry each other's ciphertext, and hold each other's mail. No node can read a message, and no node's disappearance kills the network.",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   }
 }
