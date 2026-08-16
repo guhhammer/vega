@@ -8,6 +8,7 @@
 | [threat-model.md](threat-model.md) | Who the adversaries are, what each one can do, and what stops them. |
 | [running-a-seed.md](running-a-seed.md) | Operating a bootstrap, relay and mailbox node. |
 | [testing.md](testing.md) | What the test suite proves, what it cannot, and how to write a test here. |
+| [releasing.md](releasing.md) | Cutting a release, and what a version number does and does not promise. |
 | [android.md](android.md) | Building for Android and the native work still outstanding. |
 
 ## Where else things are written down
