@@ -72,7 +72,8 @@ key that can read anything, and cannot withhold a message it never sees.
 | T2 DHT rendezvous — publish, look up, dial | done, tested over real sockets |
 | T4 mailbox park/collect | done, tested over real sockets |
 | T1 hole punching, T3 relay | wired end to end, but only two machines on two real networks can prove it |
-| Delivery receipts | `Body::Receipt` is handled on arrival but nothing sends one yet, so the outbox clears on network acceptance rather than on the recipient reading it |
+| Delivery receipts | done, tested — the outbox clears when the recipient confirms decryption, not when a peer accepts bytes |
+| Key storage | platform keyring (Secret Service / Keychain / Credential Manager), with a 0600 file where none exists |
 | Device linking (second device on one account) | the crypto is there — `Identity::adopt`, and the sigchain accepts device-signed additions — but there is no pairing flow, so an account is one device today |
 | Android | cross-compiles; foreground service and multicast lock plugins not written (see `.documentation/android.md`) |
 | Groups, T5 offline mesh | not started |
@@ -86,11 +87,15 @@ around it has not.
 
 ### Known weaknesses, not yet fixed
 
-- **The database key is a 0600 file**, not the platform keystore
-  (`app/src-tauri/src/keystore.rs`). The interface is two functions wide so it
-  can be swapped without touching anything else.
-- **`conversation()` scans every stored message.** Correct, but O(n) per call.
-  It needs a per-conversation index before a real message history exists.
+- **Device linking is not implemented.** An account is one device. The crypto
+  exists and the sigchain accepts device-signed additions; the pairing flow does
+  not, and a rushed one would be worse than none.
+- **Where there is no keyring, the key is a 0600 file.** Headless systems,
+  containers, and Android take the fallback path. It protects against another
+  user on the machine and a stolen backup, and nothing else. The app logs which
+  backing it used at startup.
+- **Android has no background delivery.** It cross-compiles; the foreground
+  service and multicast lock plugins are not written.
 - **A relay can still misroute.** The routing tag is now bound into the sealed
   layer, so rewriting it is detected rather than silently obeyed — but a relay
   that drops or misdirects an envelope still denies delivery. That is inherent
@@ -111,6 +116,8 @@ around it has not.
 - **Unbounded replay set.** Message ids are pruned on a two-week window. Safe
   because the ratchet already refuses replays inside a live session; this layer
   only catches the same message arriving over two tiers, seconds apart.
+- **Prekey exhaustion, receipts, and the conversation scan.** All three are
+  fixed; see the 0.1.0 entry in [CHANGELOG.md](CHANGELOG.md).
 - **The lock was held across network I/O.** `Runtime` now performs no I/O at
   all: it returns plans, and the caller executes them unlocked. A slow peer
   delays one delivery instead of every incoming message.

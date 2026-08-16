@@ -171,7 +171,14 @@ fn view_of(c: &vega_core::Contact, me: &AccountId) -> ContactView {
 async fn build_ctx(data_dir: std::path::PathBuf) -> Result<Ctx, String> {
     std::fs::create_dir_all(&data_dir).map_err(fail)?;
 
-    let pickle_key = keystore::load_or_create(&data_dir.join("device.key")).map_err(fail)?;
+    let key = keystore::load_or_create(&data_dir.join("device.key")).map_err(fail)?;
+    if key.backing == keystore::Backing::File {
+        tracing::warn!(
+            "the device key is stored in a file, not the platform keyring — \
+             anything running as this user can read it"
+        );
+    }
+    let pickle_key = key.bytes;
     let store = Store::open(data_dir.join("vega.redb")).map_err(fail)?;
 
     // An existing identity is loaded; a first run creates one. Never both.

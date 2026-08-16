@@ -236,6 +236,82 @@ async fn a_stranger_on_the_same_network_learns_nothing() {
     assert_ne!(envelope.to_tag, eve_guess);
 }
 
+/// A receipt acknowledges a message. Acknowledging a receipt would never
+/// terminate, so the loop has to stop after exactly one round.
+#[tokio::test]
+async fn a_receipt_does_not_produce_another_receipt() {
+    let (mut alice, alice_chain) = bootstrap_account("alice").unwrap();
+    let (mut bob, bob_chain) = bootstrap_account("bob").unwrap();
+    let mut alice_sessions = Sessions::new();
+    let mut bob_sessions = Sessions::new();
+
+    let alice_state = alice_chain.validate().unwrap();
+    let bob_state = bob_chain.validate().unwrap();
+    let both = Known(vec![alice_state.clone(), bob_state.clone()]);
+    let now = vega_core::now();
+
+    // Alice sends; Bob opens it.
+    let bob_account = bob.account_id;
+    let alice_to_bob = alice.pairwise_with(&bob_state.contact, &bob_account);
+    let text = fan_out(
+        &mut alice,
+        &mut alice_sessions,
+        &Recipient {
+            account: bob_account,
+            state: &bob_state,
+            pairwise: &alice_to_bob,
+        },
+        None,
+        &Content::new(
+            bob_account,
+            now,
+            1,
+            Body::Text {
+                text: "arrived".into(),
+            },
+        ),
+        now,
+    )
+    .unwrap();
+    let opened = bob_sessions.decrypt(&mut bob, &text[0].1, &both).unwrap();
+
+    // Bob acknowledges it.
+    let alice_account = alice.account_id;
+    let bob_to_alice = bob.pairwise_with(&alice_state.contact, &alice_account);
+    let receipt = fan_out(
+        &mut bob,
+        &mut bob_sessions,
+        &Recipient {
+            account: alice_account,
+            state: &alice_state,
+            pairwise: &bob_to_alice,
+        },
+        None,
+        &Content::new(
+            alice_account,
+            now,
+            2,
+            Body::Receipt {
+                message_id: opened.content.id,
+            },
+        ),
+        now,
+    )
+    .unwrap();
+
+    let back = alice_sessions
+        .decrypt(&mut alice, &receipt[0].1, &both)
+        .unwrap();
+
+    // A receipt names the message it clears, and carries no text — so the
+    // handler that would generate another one has nothing to act on.
+    match back.content.body {
+        Body::Receipt { message_id } => assert_eq!(message_id, opened.content.id),
+        other => panic!("expected a receipt, got {other:?}"),
+    }
+    assert_eq!(back.content.text(), None);
+}
+
 #[tokio::test]
 async fn mail_parked_with_a_peer_is_collected_later() {
     let (a, mut a_events) = Node::spawn(isolated()).unwrap();

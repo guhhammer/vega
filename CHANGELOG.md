@@ -7,7 +7,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [semver](https://semver.org), with the pre-1.0 caveat that the
 wire format is not yet stable and may break between releases.
 
-## [Unreleased]
+## [0.1.0] — 2026-08-15
+
+First release. Nothing here has been audited; read
+[SECURITY.md](SECURITY.md) before trusting it with anything that matters.
 
 ### Added
 
@@ -30,6 +33,14 @@ wire format is not yet stable and may break between releases.
 - **One-time key replenishment.** Keys are topped up when they run low, and the
   updated chain reaches contacts inside messages and rendezvous records — both
   encrypted, both serverless.
+- **Delivery receipts.** A recipient confirms decryption, which clears the
+  sender's outbox and lets a mailbox drop its copy. Acceptance by a peer only
+  ever meant "it took the bytes" — on a LAN that peer may not even have been the
+  recipient.
+- **Platform keystore.** The database key goes to Secret Service, Keychain or
+  Credential Manager, falling back to a 0600 file where no keyring exists
+  (headless, container, Android). An existing file key is migrated into the
+  keyring and removed only after the keyring is read back and confirmed.
 
 ### Security
 
@@ -63,13 +74,23 @@ Found and fixed during review, before any release:
 - **A forked sigchain shorter than ours was silently ignored** instead of being
   reported, hiding what may be evidence of a compromised root key.
 
+### Performance
+
+- **Reading a conversation no longer scans every stored message.** A multimap
+  index makes the cost proportional to that conversation rather than to the
+  whole database.
+
 ### Known limitations
 
 Stated plainly rather than omitted; the README carries the current list.
 
-- Nothing has been audited. vodozemac has; the code around it has not.
-- The database key is a 0600 file, not the platform keystore.
-- Device linking is not implemented — an account is one device today.
-- Android cross-compiles, but the foreground service and multicast lock plugins
-  are not written, so background delivery does not work yet.
-- Delivery receipts are handled on arrival but nothing sends one.
+- **Nothing has been audited.** vodozemac has; the code around it has not.
+- **Device linking is not implemented** — an account is one device today. The
+  crypto is there and the sigchain accepts device-signed additions, but there is
+  no pairing flow, and shipping a rushed one would be worse than shipping none.
+- **Android cross-compiles** but the foreground service and multicast lock
+  plugins are not written, so background delivery does not work.
+- **Tiers 1 and 3 are unproven in the field.** Hole punching and relaying cannot
+  be exercised on loopback; they need two machines on two real networks.
+- **No keyring means the file fallback**, which protects against another user
+  and a stolen backup and nothing else. The app logs which one it used.

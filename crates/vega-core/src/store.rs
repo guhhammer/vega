@@ -11,7 +11,7 @@ use crate::identity::{AccountId, DeviceId, Identity, IdentityPickle};
 use crate::keys::DhKey;
 use crate::session::Sessions;
 use crate::sigchain::Sigchain;
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Database, MultimapTableDefinition, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -20,6 +20,10 @@ const CHAINS: TableDefinition<&str, &[u8]> = TableDefinition::new("chains");
 const CONTACTS: TableDefinition<&str, &[u8]> = TableDefinition::new("contacts");
 const SESSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("sessions");
 const MESSAGES: TableDefinition<u64, &[u8]> = TableDefinition::new("messages");
+/// conversation → the sequence numbers it contains. Without this, reading a
+/// conversation means scanning every message ever stored.
+const BY_CONVERSATION: MultimapTableDefinition<&str, u64> =
+    MultimapTableDefinition::new("by_conversation");
 const SEEN: TableDefinition<&[u8], u64> = TableDefinition::new("seen");
 const OUTBOX: TableDefinition<u64, &[u8]> = TableDefinition::new("outbox");
 
@@ -74,6 +78,9 @@ pub struct OutboxItem {
     pub envelope: Vec<u8>,
     pub queued_at: u64,
     pub attempts: u32,
+    /// Which message this envelope carries, so a delivery receipt can clear it.
+    #[serde(default, with = "crate::identity::hex32")]
+    pub message_id: [u8; 32],
 }
 
 pub struct Store {
@@ -99,6 +106,7 @@ impl Store {
             tx.open_table(CONTACTS)?;
             tx.open_table(SESSIONS)?;
             tx.open_table(MESSAGES)?;
+            tx.open_multimap_table(BY_CONVERSATION)?;
             tx.open_table(SEEN)?;
             tx.open_table(OUTBOX)?;
         }
@@ -241,6 +249,9 @@ impl Store {
                 let mut t = tx.open_table(MESSAGES)?;
                 let bytes = serde_json::to_vec(msg)?;
                 t.insert(msg.seq, bytes.as_slice())?;
+
+                let mut index = tx.open_multimap_table(BY_CONVERSATION)?;
+                index.insert(msg.conversation.to_display().as_str(), msg.seq)?;
                 true
             }
         };
@@ -252,22 +263,53 @@ impl Store {
         self.bump(KEY_MESSAGE_SEQ)
     }
 
-    /// Messages in a conversation, oldest first.
+    /// The most recent `limit` messages in a conversation, oldest first.
+    ///
+    /// Reads through the index rather than scanning: cost is proportional to
+    /// the messages in *this* conversation, not to everything ever stored.
+    /// Sequence numbers are allocated monotonically, so the multimap's ordering
+    /// is chronological and the tail is what we want.
     pub fn conversation(&self, other: &AccountId, limit: usize) -> Result<Vec<StoredMessage>> {
         let tx = self.db.begin_read()?;
-        let t = tx.open_table(MESSAGES)?;
-        let mut out = Vec::new();
-        for row in t.iter()? {
-            let (_, v) = row?;
-            let m: StoredMessage = serde_json::from_slice(v.value())?;
-            if m.conversation == *other {
-                out.push(m);
+        let index = tx.open_multimap_table(BY_CONVERSATION)?;
+        let messages = tx.open_table(MESSAGES)?;
+
+        let mut seqs: Vec<u64> = index
+            .get(other.to_display().as_str())?
+            .filter_map(|v| v.ok().map(|v| v.value()))
+            .collect();
+        if seqs.len() > limit {
+            seqs.drain(..seqs.len() - limit);
+        }
+
+        let mut out = Vec::with_capacity(seqs.len());
+        for seq in seqs {
+            // A missing row means the index outlived the message, which should
+            // not happen — but a corrupt index must not take the whole thread
+            // down with it.
+            if let Some(v) = messages.get(seq)? {
+                out.push(serde_json::from_slice(v.value())?);
             }
         }
-        if out.len() > limit {
-            out.drain(..out.len() - limit);
-        }
         Ok(out)
+    }
+
+    /// Drop every queued envelope carrying this message.
+    ///
+    /// Called when the recipient confirms they decrypted it, which is the only
+    /// signal that actually means delivered — a peer accepting an envelope only
+    /// means it took the bytes.
+    pub fn dequeue_message(&self, message_id: &[u8; 32]) -> Result<usize> {
+        let doomed: Vec<u64> = self
+            .pending()?
+            .into_iter()
+            .filter(|i| i.message_id == *message_id)
+            .map(|i| i.seq)
+            .collect();
+        for seq in &doomed {
+            self.dequeue(*seq)?;
+        }
+        Ok(doomed.len())
     }
 
     /// Forget message ids older than `keep_secs`.
@@ -527,11 +569,82 @@ mod tests {
             envelope: vec![1, 2, 3],
             queued_at: NOW,
             attempts: 0,
+            message_id: [9u8; 32],
         };
         store.queue(&item).unwrap();
         assert_eq!(store.pending().unwrap().len(), 1);
         store.dequeue(item.seq).unwrap();
         assert!(store.pending().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_receipt_clears_every_envelope_carrying_that_message() {
+        let (store, _dir) = store();
+        let who = Identity::create("x").account_id;
+        let id = [7u8; 32];
+
+        // One message fans out to several devices, so several outbox entries
+        // carry it. A receipt must clear all of them, not just the first.
+        for _ in 0..3 {
+            store
+                .queue(&OutboxItem {
+                    seq: store.next_outbox_seq().unwrap(),
+                    to_account: who,
+                    to_device: DeviceId([1u8; 32]),
+                    envelope: vec![1],
+                    queued_at: NOW,
+                    attempts: 0,
+                    message_id: id,
+                })
+                .unwrap();
+        }
+        store
+            .queue(&OutboxItem {
+                seq: store.next_outbox_seq().unwrap(),
+                to_account: who,
+                to_device: DeviceId([1u8; 32]),
+                envelope: vec![2],
+                queued_at: NOW,
+                attempts: 0,
+                message_id: [8u8; 32],
+            })
+            .unwrap();
+
+        assert_eq!(store.dequeue_message(&id).unwrap(), 3);
+        assert_eq!(store.pending().unwrap().len(), 1);
+        // An unknown id clears nothing.
+        assert_eq!(store.dequeue_message(&[0u8; 32]).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_conversation_reads_only_its_own_messages() {
+        let (store, _dir) = store();
+        let a = Identity::create("a").account_id;
+        let b = Identity::create("b").account_id;
+
+        for (who, text) in [(a, "a1"), (b, "b1"), (a, "a2"), (b, "b2"), (a, "a3")] {
+            let msg = StoredMessage {
+                seq: store.next_message_seq().unwrap(),
+                conversation: who,
+                from_account: who,
+                from_device: DeviceId([0u8; 32]),
+                outgoing: false,
+                received_at: NOW,
+                content: Content::new(who, NOW, 1, Body::Text { text: text.into() }),
+            };
+            store.append_message(&msg).unwrap();
+        }
+
+        let convo = store.conversation(&a, 100).unwrap();
+        assert_eq!(convo.len(), 3);
+        assert_eq!(convo[0].content.text(), Some("a1"));
+        assert_eq!(convo[2].content.text(), Some("a3"));
+
+        // The limit keeps the most recent, still oldest-first.
+        let tail = store.conversation(&a, 2).unwrap();
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].content.text(), Some("a2"));
+        assert_eq!(tail[1].content.text(), Some("a3"));
     }
 
     #[test]

@@ -269,6 +269,7 @@ impl Runtime {
 
         let me = self.identity.account_id;
         let my_device = self.identity.device_id;
+        let message_id = content.id;
 
         let envelopes = fan_out(
             &mut self.identity,
@@ -307,6 +308,7 @@ impl Runtime {
                 envelope: envelope.to_bytes()?,
                 queued_at: now,
                 attempts: 0,
+                message_id,
             })?;
         }
 
@@ -368,7 +370,15 @@ impl Runtime {
                 (*to, true)
             }
 
-            Body::Receipt { .. } => {
+            // The only signal that actually means *delivered*. A peer accepting
+            // an envelope only means it took the bytes; it may not have been
+            // the recipient at all, since delivery on a LAN is a broadcast.
+            Body::Receipt { message_id } => {
+                match self.store.dequeue_message(message_id) {
+                    Ok(n) if n > 0 => tracing::debug!(cleared = n, "receipt cleared the outbox"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "could not clear the outbox"),
+                }
                 let _ = self.persist();
                 return Received::Housekeeping;
             }
@@ -381,6 +391,7 @@ impl Runtime {
             return Received::Housekeeping;
         };
 
+        let message_id = opened.content.id;
         let stored = vega_core::StoredMessage {
             seq,
             conversation,
@@ -395,6 +406,15 @@ impl Runtime {
             // Already had it — a replay, or the same message over two tiers.
             Ok(false) => Received::Housekeeping,
             Ok(true) => {
+                // Tell the sender it arrived, so they can stop retrying and any
+                // mailbox still holding a copy can drop it. Only for text: a
+                // receipt for a receipt would never terminate.
+                if !outgoing {
+                    if let Err(e) = self.acknowledge(&opened.from_account, &message_id) {
+                        tracing::debug!(error = %e, "could not queue a receipt");
+                    }
+                }
+
                 // Whoever opened this may have consumed one of our one-time keys.
                 if let Err(e) = self.maintain_prekeys() {
                     tracing::warn!(error = %e, "could not replenish one-time keys");
@@ -407,6 +427,64 @@ impl Runtime {
                 Received::Housekeeping
             }
         }
+    }
+
+    /// Queue a receipt telling `to` that `message_id` was decrypted.
+    ///
+    /// Encrypted and fanned out like any other message, so a receipt reveals no
+    /// more to the network than the message it acknowledges. No self-copy: my
+    /// other devices do not need to know I read something.
+    fn acknowledge(&mut self, to: &AccountId, message_id: &[u8; 32]) -> vega_core::Result<()> {
+        let contact = self
+            .store
+            .get_contact(to)?
+            .ok_or_else(|| vega_core::Error::UnknownContact(to.short()))?;
+        let their_state = self
+            .store
+            .load_chain(to)?
+            .ok_or_else(|| vega_core::Error::UnknownContact(to.short()))?
+            .validate()?;
+
+        let now = vega_core::now();
+        let pairwise = self
+            .identity
+            .pairwise_with(&contact.contact_key, &contact.account_id);
+
+        let content = Content::new(
+            *to,
+            now,
+            self.store.next_message_seq()?,
+            Body::Receipt {
+                message_id: *message_id,
+            },
+        );
+        let receipt_id = content.id;
+
+        let envelopes = fan_out(
+            &mut self.identity,
+            &mut self.sessions,
+            &Recipient {
+                account: *to,
+                state: &their_state,
+                pairwise: &pairwise,
+            },
+            None,
+            &content,
+            now,
+        )?;
+
+        for (device, envelope) in envelopes {
+            self.store.queue(&vega_core::OutboxItem {
+                seq: self.store.next_outbox_seq()?,
+                to_account: *to,
+                to_device: device,
+                envelope: envelope.to_bytes()?,
+                queued_at: now,
+                attempts: 0,
+                message_id: receipt_id,
+            })?;
+        }
+        Ok(())
     }
 
     // ---- plans for the caller to execute --------------------------------
