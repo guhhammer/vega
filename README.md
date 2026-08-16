@@ -9,6 +9,29 @@ that does *not* protect against, is in
 [`.documentation/design.md`](.documentation/design.md) — also published as an
 [artifact](https://claude.ai/code/artifact/55208dd3-3049-42ef-a923-da62b1a9f61a).
 
+## Download
+
+| Platform | File |
+|---|---|
+| Linux (any distribution) | [`Vega-linux-x86_64.AppImage`](https://github.com/guhhammer/vega/releases/latest/download/Vega-linux-x86_64.AppImage) |
+| Debian, Ubuntu | [`Vega-linux-amd64.deb`](https://github.com/guhhammer/vega/releases/latest/download/Vega-linux-amd64.deb) |
+| macOS (Intel and Apple silicon) | [`Vega-macos-universal.dmg`](https://github.com/guhhammer/vega/releases/latest/download/Vega-macos-universal.dmg) |
+| Windows | [`Vega-windows-x86_64-setup.exe`](https://github.com/guhhammer/vega/releases/latest/download/Vega-windows-x86_64-setup.exe) |
+
+Neither the macOS nor the Windows build is signed, so the first open will show a
+warning from the operating system.
+[`SHA256SUMS.txt`](https://github.com/guhhammer/vega/releases/latest) on the
+release lists the checksum of each file above — worth checking, and worth more
+than a certificate.
+
+Per-platform steps, including how to get past those warnings and where Vega
+keeps its data, are in
+[`.documentation/installing.md`](.documentation/installing.md). There is nothing
+to sign up for: the first launch generates an account on the device.
+
+**Nothing here has been audited.** Read the [security notes](#security-notes)
+before trusting it with anything that matters.
+
 ## Layout
 
 ```
@@ -21,18 +44,31 @@ app/src-tauri      the shell: commands, runtime, key storage
 The split is load-bearing. `vega-net` handles envelopes it cannot open, which is
 what makes it safe for a stranger's node to relay them.
 
-## Running it
+## Building it
+
+Needs Rust (the pinned version in `rust-toolchain.toml` is fetched
+automatically), Node 20 or newer, and the Tauri system dependencies for your
+platform — [tauri.app/start/prerequisites](https://tauri.app/start/prerequisites/).
 
 ```bash
 ./make check     # fmt, clippy, tests, typecheck — run this constantly
 ./make dev       # desktop app against the vite dev server
-./make dist      # a real installer
+./make dist      # this machine's installers, staged in release/
 ./make node      # headless bootstrap/relay/mailbox node
 ```
 
 `cargo build` alone produces binaries that prove the code compiles but are not
-applications — without the Tauri CLI there is no frontend embedded. Use `dev` or
-`dist`.
+applications — without the Tauri CLI there is no frontend embedded, so the
+window opens on a connection error. Use `dev` or `dist`.
+
+`./make dist` writes `release/` with the same file names as the download table
+above and a `SHA256SUMS.txt` beside them, so a local build and a released build
+are interchangeable. Tauri links against the system webview and cannot
+cross-compile, so each machine builds only its own platform; CI builds all
+three on a `v*` tag. See
+[`.documentation/releasing.md`](.documentation/releasing.md).
+
+## Using it
 
 ### Two machines on one network
 

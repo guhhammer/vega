@@ -2,6 +2,7 @@
 
 | | |
 |---|---|
+| [installing.md](installing.md) | Getting the application onto a machine, verifying the download, and where it keeps its data. Start here if you are not building from source. |
 | [design.md](design.md) | The protocol design, as drafted before implementation. Why the system is shaped this way, and what it deliberately does not protect against. |
 | [architecture.md](architecture.md) | How the code is actually arranged, and which boundaries are load-bearing. Read after the design. |
 | [wire-format.md](wire-format.md) | Byte-level reference for everything that crosses a network. What each party can see. |
