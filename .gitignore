@@ -6,6 +6,10 @@ node_modules/
 app/dist/
 app/src-tauri/gen/
 
+# Installers staged by `./make dist`. They are release artifacts, published to
+# a GitHub Release by release.yml — never committed.
+/release/
+
 logs/
 
 .env
