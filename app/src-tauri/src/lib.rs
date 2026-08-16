@@ -449,8 +449,91 @@ async fn announce_loop(ctx: Ctx) {
     }
 }
 
+/// Stop a development build that was launched on its own, with an explanation.
+///
+/// A dev build does not contain the frontend: `tauri.conf.json` points the
+/// window at the vite dev server instead, so running this binary directly —
+/// `cargo run`, or `target/debug/vega-app` — starts the Rust half correctly,
+/// prints its listening addresses, and then opens a window on "Could not
+/// connect to localhost". That message names the symptom and not the cause,
+/// and the fix is not guessable from it, so the port is checked up front and
+/// the answer printed instead.
+///
+/// Release builds embed the frontend and never call this, which is why it is
+/// behind `debug_assertions` rather than a runtime flag.
+#[cfg(all(debug_assertions, not(mobile)))]
+fn require_dev_server() {
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::{Duration, Instant};
+
+    // Fixed rather than read from the config: vite.config.ts sets
+    // `strictPort`, so this is the only port a dev server is ever on.
+    const DEV_ADDR: &str = "localhost:1420";
+
+    // `tauri dev` starts vite and this binary concurrently, and against a warm
+    // cargo cache the binary wins often enough that checking the port once
+    // would fail the dev loop at random — vite needs a few hundred
+    // milliseconds that a 0.7s incremental build does not leave it. So this
+    // waits rather than samples. The deadline is what stops it hanging forever
+    // when there is genuinely no dev server coming.
+    const DEADLINE: Duration = Duration::from_secs(20);
+
+    let started = Instant::now();
+    let mut announced = false;
+
+    while started.elapsed() < DEADLINE {
+        // `localhost` resolves to both ::1 and 127.0.0.1 on a dual-stack
+        // machine while vite binds only one of them, so every candidate
+        // address is tried before concluding that nothing is listening.
+        let reachable = DEV_ADDR
+            .to_socket_addrs()
+            .map(|mut addrs| {
+                addrs.any(|addr| {
+                    TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+                })
+            })
+            .unwrap_or(false);
+
+        if reachable {
+            return;
+        }
+
+        // Only once the wait is long enough to look like a hang, so a normal
+        // `./make dev` start stays silent.
+        if !announced && started.elapsed() > Duration::from_secs(2) {
+            eprintln!("Vega: waiting for the vite dev server on http://{DEV_ADDR} …");
+            announced = true;
+        }
+
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    eprintln!(
+        "\n\
+         Vega: nothing came up on http://{DEV_ADDR}, so this window would have\n\
+         opened on \"Could not connect to localhost\".\n\
+         \n\
+         This is a development build. It does not contain the frontend — the\n\
+         window loads it from the vite dev server — so starting this binary on\n\
+         its own can never work, however many times it is tried.\n\
+         \n\
+         Run the whole stack, which starts vite first and then this binary:\n\
+         \n    ./make dev\n\
+         \n\
+         Or build a real application, which embeds the frontend and needs no\n\
+         dev server at all:\n\
+         \n    ./make dist\n"
+    );
+    std::process::exit(1);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before tracing is initialised, so the explanation is not buried under a
+    // screen of listening addresses that are themselves working fine.
+    #[cfg(all(debug_assertions, not(mobile)))]
+    require_dev_server();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
