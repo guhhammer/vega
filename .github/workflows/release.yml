@@ -1,44 +1,280 @@
+# Release: turn a version tag into installers on a GitHub Release.
+#
+#     git tag v1.0.0 && git push origin v1.0.0
+#
+# From there this workflow builds on one runner per platform — Tauri links
+# against the system webview and cannot cross-compile, so there is no way to
+# produce all three from one machine — and attaches the results to a release
+# named after the tag.
+#
+# Each runner runs the same bundle commands as `./make dist`, and stages the
+# results under the same download names, which is what keeps a local build and
+# a released build the same thing.
+#
+# The release is created once, up front, by a job of its own. Letting the three
+# build jobs each create-if-missing is a race: they start together, all see no
+# release, and two of them fail or duplicate it.
+#
+# The release is a **draft**, so a bad build can be discarded before anyone
+# sees it. Publishing is one click on the Releases page. Note that the
+# `/releases/latest/download/…` links below only resolve once a release is
+# published; set `RELEASE_DRAFT: false` to have every tag go straight out.
+#
+# Alongside Tauri's own version-stamped file names, each build uploads a copy
+# under a name that never changes, so a download link can be written once:
+#
+#     https://github.com/guhhammer/vega/releases/latest/download/Vega-linux-x86_64.AppImage
+#     https://github.com/guhhammer/vega/releases/latest/download/Vega-linux-amd64.deb
+#     https://github.com/guhhammer/vega/releases/latest/download/Vega-macos-universal.dmg
+#     https://github.com/guhhammer/vega/releases/latest/download/Vega-windows-x86_64-setup.exe
+#
+# Nothing here signs or notarizes: macOS will warn on first open and Windows
+# SmartScreen will too, which is the usual cost of an unsigned open-source
+# release. Adding certificates is a matter of secrets and two extra env vars —
+# see tauri.app/distribute.
 name: release
 
 on:
   push:
     tags: ["v*"]
+  # Re-run against a tag that already exists, e.g. after fixing a runner issue.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build, e.g. v1.0.0"
+        required: true
+        type: string
 
+# The workflow creates a release and uploads to it.
 permissions:
   contents: write
 
+# One release per tag; a second run for the same tag must not interleave with
+# the first. Not cancel-in-progress — a half-uploaded release is worse than a
+# duplicated run.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_DRAFT: "true"
+
 jobs:
+  # A tag that disagrees with the version in the tree would produce installers
+  # whose file names contradict the release they hang under. Cheap to check,
+  # and it fails in seconds rather than after three platform builds.
+  verify:
+    name: verify tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - id: resolve
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve.outputs.tag }}
+
+      # Three files carry the version and all three end up visible: Cargo.toml
+      # names the binary, tauri.conf.json names the bundles, and package.json is
+      # what anyone reading the frontend believes. Any one of them drifting is
+      # the kind of thing only noticed once it is already in a release.
+      - name: tag must match the version in the tree
+        env:
+          TAGGED: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          cargo_version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          pkg_version="$(grep -m1 '"version"' app/package.json | cut -d'"' -f4)"
+          conf_version="$(grep -m1 '"version"' app/src-tauri/tauri.conf.json | cut -d'"' -f4)"
+
+          fail=0
+          if [ "$cargo_version" != "$TAGGED" ]; then
+            echo "::error file=Cargo.toml::tag $TAGGED does not match workspace version $cargo_version"
+            fail=1
+          fi
+          if [ "$pkg_version" != "$TAGGED" ]; then
+            echo "::error file=app/package.json::tag $TAGGED does not match package.json version $pkg_version"
+            fail=1
+          fi
+          if [ "$conf_version" != "$TAGGED" ]; then
+            echo "::error file=app/src-tauri/tauri.conf.json::tag $TAGGED does not match tauri.conf.json version $conf_version"
+            fail=1
+          fi
+          [ "$fail" -eq 0 ] || exit 1
+          echo "Building $TAGGED"
+
+  # Created once, before any build starts, so the three build jobs have
+  # somewhere to upload to rather than each trying to create it.
+  create-release:
+    name: create draft release
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+
+      # The release notes are this version's CHANGELOG section, so the release
+      # page says what changed instead of pointing at a file. If the section is
+      # missing the release still happens — a link is a fine fallback, and
+      # failing three platform builds over prose would not be.
+      - name: collect release notes
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { found = 1; next }
+            found && /^## \[/       { exit }
+            found                    { print }
+          ' CHANGELOG.md > notes.md
+
+          if [ ! -s notes.md ]; then
+            echo "::warning::no CHANGELOG section for $VERSION; using a generic body"
+            echo "See CHANGELOG.md for what changed." > notes.md
+          fi
+
+          cat >> notes.md <<'EOF'
+
+          ---
+
+          ### Downloads
+
+          | Platform | File |
+          | --- | --- |
+          | Linux (any distribution) | `Vega-linux-x86_64.AppImage` |
+          | Debian, Ubuntu | `Vega-linux-amd64.deb` |
+          | macOS (Intel and Apple silicon) | `Vega-macos-universal.dmg` |
+          | Windows | `Vega-windows-x86_64-setup.exe` |
+
+          Neither the macOS nor the Windows build is signed, so the first open
+          will show a warning from the operating system.
+
+          `SHA256SUMS.txt` lists the checksum of each file above.
+
+          **Nothing here has been audited.** Read
+          [SECURITY.md](https://github.com/guhhammer/vega/blob/main/SECURITY.md)
+          before trusting it with anything that matters.
+          EOF
+
+      - name: create or reuse the draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # A re-run against a tag that already has a release should update it,
+          # not fail. Notes are refreshed either way.
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release for $TAG exists; updating its notes."
+            gh release edit "$TAG" --title "Vega $VERSION" --notes-file notes.md
+          else
+            # Not `[ … ] && draft_flag=…`: under `set -e` the false branch of
+            # that is a failing command and would end the step.
+            draft_flag=""
+            if [ "${RELEASE_DRAFT}" = "true" ]; then
+              draft_flag="--draft"
+            fi
+            # shellcheck disable=SC2086
+            gh release create "$TAG" $draft_flag \
+              --title "Vega $VERSION" \
+              --notes-file notes.md \
+              --target "$(git rev-parse HEAD)"
+          fi
+
+          # Not `releases/tags/$TAG`: that endpoint resolves published releases
+          # only. A draft is not attached to a tag ref until it is published —
+          # GitHub even addresses it as `untagged-<id>` until then — so looking
+          # it up by tag 404s on exactly the releases this workflow creates.
+          # Listing carries `tag_name` on drafts too, which is what to match on.
+          # Collected first and narrowed after: piping gh straight into `head`
+          # lets head close the pipe early, and under `pipefail` that SIGPIPE
+          # would fail the step for no reason.
+          ids="$(gh api "repos/${{ github.repository }}/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .id")"
+          id="$(printf '%s\n' "$ids" | head -n1)"
+
+          if [ -z "$id" ]; then
+            echo "::error::no release found for $TAG after creating it"
+            exit 1
+          fi
+
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
+          echo "Release id $id"
+
   build:
+    name: ${{ matrix.name }}
+    needs: [verify, create-release]
     strategy:
+      # One platform failing should not throw away installers that did build —
+      # the release is a draft and can be completed by re-running the one job.
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          # 22.04 rather than the newest Ubuntu on purpose: the AppImage and the
+          # .deb inherit the glibc of the machine that built them, and building
+          # on the oldest supported runner is what makes them run elsewhere.
+          - name: linux (AppImage, deb)
+            platform: ubuntu-22.04
+            bundles: appimage,deb
+            args: ""
+          # One binary for both Apple architectures, so there is a single
+          # download and no chance of picking the wrong one.
+          - name: macos (dmg)
+            platform: macos-latest
+            bundles: app,dmg
+            args: --target universal-apple-darwin
+          - name: windows (setup.exe)
+            platform: windows-latest
+            bundles: nsis
+            args: ""
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
 
-      - name: Linux system dependencies
-        if: matrix.os == 'ubuntu-latest'
+      # Tauri links against the system webview and GTK; the packaging tools are
+      # needed for the AppImage and the .deb specifically.
+      - name: linux build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
-            libayatana-appindicator3-dev librsvg2-dev build-essential
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            libxdo-dev libssl-dev librsvg2-dev patchelf file \
+            desktop-file-utils fakeroot
 
+      # No `with: toolchain` — rust-toolchain.toml pins it, which also keeps the
+      # dependency cache from being invalidated every six weeks.
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
+      # Added here rather than in rust-toolchain.toml so that Linux and Windows
+      # runners do not download two Apple standard libraries they never use. No
+      # `--toolchain` flag: this applies to whichever toolchain is active, which
+      # is the pinned one when run from the repository root.
+      - name: add the apple targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      # Deliberately no Swatinem/rust-cache here, unlike ci.yml and nightly.yml.
+      # What ships should be built from source on a clean machine rather than
+      # assembled partly from whatever a previous job happened to leave behind.
+      # Releases are rare and this costs one cold build per platform; the two
+      # workflows that run constantly are the ones where caching earns its keep.
 
       - uses: actions/setup-node@v4
         with:
@@ -54,17 +290,109 @@ jobs:
       # and shipping a messenger that fails its own authentication tests would
       # be worse than shipping late.
       - run: cargo test --workspace
-        timeout-minutes: 25
+        timeout-minutes: 30
 
+      # Builds the frontend (through `beforeBuildCommand`), compiles the binary,
+      # packages it, and uploads to the release created above.
       - uses: tauri-apps/tauri-action@v0
+        id: tauri
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # linuxdeploy, which assembles the AppImage, is a type-2 AppImage and
+          # mounts itself with FUSE 2 to run. The pinned 22.04 runner still has
+          # it, but newer images and most current distributions ship only FUSE
+          # 3, where the mount fails and the only message is `failed to run
+          # linuxdeploy`. Extracting instead of mounting produces the same
+          # AppImage and does not care which FUSE is present — the same thing
+          # `./make dist` does, so the two stay equivalent.
+          APPIMAGE_EXTRACT_AND_RUN: 1
         with:
           projectPath: app
-          tagName: ${{ github.ref_name }}
-          releaseName: Vega ${{ github.ref_name }}
-          releaseBody: |
-            Nothing here has been audited. Read SECURITY.md before trusting it
-            with anything that matters.
-          releaseDraft: true
-          args: --target ${{ matrix.target }}
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          # No updater is configured, so the signature manifest would be noise.
+          includeUpdaterJson: false
+          args: --bundles ${{ matrix.bundles }} ${{ matrix.args }}
+
+      # Version-stamped names are what Tauri produces and what the release page
+      # should show. These copies exist so a link can be written once and keep
+      # working; `--clobber` makes a re-run replace them. The names match what
+      # `./make dist` stages locally.
+      #
+      # Bundles land under the workspace target/, not app/src-tauri/target:
+      # app/src-tauri is a member of the root workspace and shares its target
+      # directory.
+      - name: upload stable-named copies
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p aliases
+
+          # Exactly one file is expected per pattern; anything else means the
+          # bundle layout moved and the alias would be silently wrong.
+          copy() {
+            local pattern="$1" name="$2"
+            # shellcheck disable=SC2206
+            local matches=( $pattern )
+            if [ ${#matches[@]} -ne 1 ] || [ ! -f "${matches[0]}" ]; then
+              echo "::error::expected one file matching $pattern, found ${#matches[@]}"
+              exit 1
+            fi
+            cp "${matches[0]}" "aliases/$name"
+          }
+
+          case "${{ runner.os }}" in
+            Linux)
+              copy 'target/release/bundle/appimage/*.AppImage' Vega-linux-x86_64.AppImage
+              copy 'target/release/bundle/deb/*.deb'           Vega-linux-amd64.deb
+              ;;
+            macOS)
+              copy 'target/universal-apple-darwin/release/bundle/dmg/*.dmg' Vega-macos-universal.dmg
+              ;;
+            Windows)
+              copy 'target/release/bundle/nsis/*-setup.exe' Vega-windows-x86_64-setup.exe
+              ;;
+          esac
+
+          gh release upload "$TAG" aliases/* --clobber
+
+  # Checksums cover every file on the release, so they can only be computed
+  # once all three platforms have uploaded. A platform that failed leaves the
+  # others still checksummed — the draft is inspected before publishing anyway.
+  #
+  # This job works on the release rather than the tree, so it deliberately does
+  # not check anything out — which is why GH_REPO is set below.
+  checksums:
+    name: checksums
+    needs: [verify, build]
+    if: always() && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      - name: publish SHA256SUMS.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          # Without a checkout there is no git remote for gh to read the
+          # repository from, and it stops with `fatal: not a git repository`
+          # before it ever reaches the release. Naming the repo outright is
+          # cheaper than cloning the tree only to satisfy that lookup.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p sums && cd sums
+
+          # Download everything already attached, except a checksum file from a
+          # previous run, which must not end up listed inside its replacement.
+          gh release download "$TAG" --dir . --clobber
+          rm -f SHA256SUMS.txt
+
+          if [ -z "$(ls -A)" ]; then
+            echo "::error::no artifacts on $TAG — every platform build failed"
+            exit 1
+          fi
+
+          sha256sum ./* | sed 's| \./| |' > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release upload "$TAG" SHA256SUMS.txt --clobber

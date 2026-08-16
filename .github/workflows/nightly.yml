@@ -47,8 +47,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # `--no-deps` documents only this workspace, but the dependencies are
+      # still compiled and vega-app's build scripts still run pkg-config against
+      # the system webview. Without these, the job fails long before rustdoc.
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev build-essential
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: docs
       # Broken intra-doc links are how documentation rots without anyone
       # noticing, so they are errors rather than warnings.
       - run: cargo doc --workspace --no-deps --document-private-items
@@ -79,8 +89,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # udeps compiles the whole workspace to see what is actually linked, so
+      # vega-app needs the system webview here exactly as it does elsewhere.
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev build-essential
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: udeps
       # A dependency nobody uses is still a dependency somebody has to trust.
       - run: cargo install cargo-udeps --locked
       - run: cargo +nightly udeps --workspace --all-targets

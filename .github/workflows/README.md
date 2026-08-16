@@ -5,7 +5,7 @@
 | [`ci.yml`](ci.yml) | push to `main`, every PR | fmt, clippy, tests, frontend build |
 | [`audit.yml`](audit.yml) | dependency changes, weekly | RustSec and npm advisories |
 | [`nightly.yml`](nightly.yml) | nightly, manual | Android cross-compile, docs, release-profile build |
-| [`release.yml`](release.yml) | `v*` tags, manual | Bundles for Linux, macOS and Windows |
+| [`release.yml`](release.yml) | `v*` tags, manual | Installers for Linux, macOS and Windows on a draft release, plus checksums |
 
 ## Why they are split this way
 
@@ -24,6 +24,15 @@ to the change in front of you; finding out the next morning is soon enough.
 **`release.yml` re-runs the tests** even though the tagged commit already passed
 them. Shipping a messenger that fails its own authentication tests would be
 worse than shipping late.
+
+It is also the one workflow with four jobs rather than one, and the shape is
+deliberate. The tag is checked against the version in the tree first, so a
+mismatch costs seconds instead of three platform builds. The release is then
+created **once**, by a job of its own — letting the three build jobs each
+create-if-missing is a race, since they start together, all see no release, and
+two of them fail or duplicate it. Checksums come last, because they can only
+cover files that have finished uploading. See
+[`../../.documentation/releasing.md`](../../.documentation/releasing.md).
 
 ## Conventions
 
