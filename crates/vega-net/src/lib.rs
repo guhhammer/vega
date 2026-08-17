@@ -31,4 +31,4 @@ pub use node::{peer_id_of, with_peer, NetEvent, Node, NodeHandle, Source};
 pub use protocol::{Request, Response};
 pub use rendezvous::{open_record, seal_record, AddressRecord};
 
-pub use libp2p::{Multiaddr, PeerId};
+pub use libp2p::{kad::Mode as KadMode, Multiaddr, PeerId};

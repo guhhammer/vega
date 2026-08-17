@@ -11,7 +11,7 @@ Stating limits precisely is what separates a security design from a claim.
 |---|---|
 | **Content** | Only the intended devices can read a message. |
 | **Authorship** | A message attributed to someone was sent by them. |
-| **Association** | Who is talking to whom stays hidden from intermediaries. |
+| **Association** | Who is talking to whom stays hidden from intermediaries — as *identities*. An intermediary serving both ends can still pair up two addresses; see B and C. |
 | **Continuity** | A past compromise does not decrypt past messages; a present one does not last forever. |
 | **Availability of your data** | Nobody else can delete or withhold your mail. |
 
@@ -44,7 +44,8 @@ forever; that is fixed, but presence itself is not hideable on a LAN.
 *A stranger whose node is carrying your ciphertext. By design there will be many.*
 
 **Can:** see two routing tags, the byte count, and the timing of everything it
-forwards. Refuse to forward. Drop an envelope.
+forwards. Refuse to forward. Drop an envelope. **Learn that two IP addresses are
+in contact, if it serves both ends** — see below.
 
 **Cannot:** read content, learn either party's account, link a tag to an identity,
 link this hour's tags to last hour's, or collect mail it is holding for someone
@@ -59,11 +60,36 @@ delivery by dropping. The outbox retries and climbs a tier, but a relay that is
 your only path can stop you. That is inherent to asking a stranger to carry your
 traffic.
 
+**Residual, and the sharper one — association survives at the IP layer.** The
+list above is about *accounts*, and it holds: a mailbox never learns who either
+party is in Vega's terms. But tier 4 routes both ends of a message through one
+node by construction. The sender parks under tag `T`; the recipient must collect
+tag `T` from the same node, because that is where the envelope is. The operator
+therefore sees one connection park `T` and a different connection collect it,
+and can join the two addresses.
+
+It has not learned two account ids. It has learned that two IP addresses are in
+contact — which is the same social graph under a different key, and against an
+operator who can resolve an address to a person it is the graph itself. **Do not
+read "cannot learn either party's account" as "cannot tell who is talking to
+whom."**
+
+Hourly rotation is what bounds this rather than fixes it: `T` changes every
+epoch, so any one operator sees a pairing for an hour rather than
+indefinitely, and a party that moves between mailboxes is not followed. An
+adversary running many nodes accumulates those windows.
+
+The honest mitigation is the one Vega does not have: without onion routing there
+is no way to hand an envelope to a mailbox without also handing it your address.
+Choosing mailboxes you have some reason to trust is the only lever available
+today, and it is a weak one.
+
 ### C. A DHT node
 
 *Stores rendezvous records.*
 
 **Can:** see a 32-byte key holding an opaque blob, and how often it changes.
+**Learn that two IP addresses are in contact** — see below.
 
 **Cannot:** determine whose record it holds, read the addresses inside, or find
 a record without already being a contact of the publisher.
@@ -75,6 +101,22 @@ the social graph; here the key is unguessable unless you are already a contact.
 **Residual:** a node can see *that* records exist and count them. Publishing one
 record per contact means the count leaks an upper bound on your contact list
 size to a node positioned to observe all of them.
+
+**Residual, association at the IP layer:** the same shape as B, for the same
+structural reason. Kademlia places a record on the nodes closest to its key, so
+the publisher and the contact who fetches it necessarily meet at those nodes.
+One of them sees an address publish under key `K` and another address fetch `K`.
+Sharing a rendezvous key *is* being contacts, so that node has the pairing —
+again as two addresses rather than two accounts.
+
+The epoch rotation helps more here than it does at a mailbox: `K` changes every
+hour and lands somewhere else in the keyspace, so a pair is not observed by the
+same neighbourhood twice running. Scraping the graph this way means running
+enough of the DHT to keep intersecting it.
+
+**This is why the DHT being unscrapable is a claim about *keys*, not about
+observation.** Nobody can enumerate who talks to whom. A node that happens to
+hold the right key for an hour learns one edge of it.
 
 ### D. Someone holding your invite
 
@@ -231,8 +273,12 @@ audited by anyone.
 
 ## Explicit non-goals
 
-- **Anonymity.** Vega hides who you are talking to from intermediaries. It does
-  not hide that you are using it.
+- **Anonymity.** Vega hides *who* you are talking to from intermediaries — no
+  intermediary learns an account id. It does not hide that you are using it, and
+  it does not hide your address from the peers you route through: a mailbox or
+  DHT node serving both ends of a conversation can pair the two addresses even
+  though it can name neither. Onion routing is what would fix that, and it is
+  not here.
 - **Plausible deniability of participation.** A relay knows you are online.
 - **Resistance to a global passive adversary.** See E.
 - **Protection from your own devices.** See F.

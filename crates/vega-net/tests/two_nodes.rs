@@ -33,6 +33,9 @@ fn isolated() -> NodeConfig {
         enable_upnp: false,
         act_as_relay: false,
         act_as_mailbox: true,
+        // These two are the whole DHT in these tests; if neither serves, a
+        // published record has nowhere to land.
+        kad_mode: vega_net::KadMode::Server,
     }
 }
 

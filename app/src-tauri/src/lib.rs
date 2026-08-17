@@ -1033,14 +1033,17 @@ async fn build_ctx(data_dir: std::path::PathBuf) -> Result<Ctx, String> {
     // not need a rebuild. A seed can neither read messages nor withhold them;
     // it only makes the DHT joinable and may offer to relay.
     let seeds = read_seeds(&data_dir.join("seeds.json"));
-    let mut config = NodeConfig::default().with_bootstrap(seeds.clone());
-    if cfg!(target_os = "android") {
-        // A phone takes from the network without carrying anyone else's traffic.
-        let mobile = NodeConfig::mobile();
-        config.enable_upnp = mobile.enable_upnp;
-        config.act_as_relay = mobile.act_as_relay;
-        config.act_as_mailbox = mobile.act_as_mailbox;
+    // A phone takes from the network without carrying anyone else's traffic.
+    // Taken whole rather than field by field: copying the fields that looked
+    // relevant is how `kad_mode` stayed at its desktop default here long after
+    // `mobile()` had an opinion about it, and every future field would inherit
+    // the same bug.
+    let config = if cfg!(target_os = "android") {
+        NodeConfig::mobile()
+    } else {
+        NodeConfig::default()
     }
+    .with_bootstrap(seeds.clone());
 
     let (net, events) = Node::spawn(config).map_err(fail)?;
 

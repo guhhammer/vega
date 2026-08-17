@@ -78,9 +78,12 @@ impl Vega {
 
         let mut kad =
             kad::Behaviour::with_config(peer_id, kad::store::MemoryStore::new(peer_id), kad_config);
-        // Server mode: this node answers queries and stores records for others.
-        // Without it a node is a leech and the DHT has nowhere to put anything.
-        kad.set_mode(Some(kad::Mode::Server));
+        // Whether this node answers queries and stores records for others. A
+        // network of pure clients has nowhere to put anything, so the desktop
+        // default is `Server`; a phone opts out, because serving means taking
+        // connections from peers it never chose and handing each of them an
+        // address. See [`NodeConfig::kad_mode`].
+        kad.set_mode(Some(config.kad_mode));
 
         // Size limits are set explicitly rather than left to the codec default:
         // this is the one place a stranger's bytes reach our allocator before we
