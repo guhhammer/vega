@@ -15,6 +15,8 @@ export interface Contact {
   display_name: string;
   verified: boolean;
   safety_number: string;
+  /** The same fingerprint as words, for reading aloud instead of the digits. */
+  safety_words: string;
 }
 
 export interface FileInfo {

@@ -418,12 +418,42 @@ button.danger:hover:not(:disabled) {
   margin: 0;
 }
 
+/* A button rather than a label: clicking copies both renderings, which is what
+   you want when reading them into a call on another device. */
 .chat header .safety {
   font-family: var(--mono);
   font-size: 0.66rem;
   color: var(--ink-3);
   margin-left: auto;
   text-align: right;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  max-width: 32ch;
+  padding: 0.3rem 0.5rem;
+  background: transparent;
+  border-color: transparent;
+}
+
+.chat header .safety:hover {
+  background: var(--surface-2);
+}
+
+.safety-label {
+  color: var(--ink-3);
+}
+
+/* The words carry the check, so they get the readable weight; the digits stay
+   available underneath for anyone who would rather compare those. */
+.safety-words {
+  color: var(--ink-2);
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.safety-digits {
+  font-size: 0.6rem;
+  opacity: 0.75;
 }
 
 .thread {

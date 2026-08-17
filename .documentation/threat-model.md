@@ -151,8 +151,20 @@ Written down in [`../README.md`](../README.md) rather than glossed.
 **Cannot:** do it after safety numbers have been compared.
 
 **What stops them:** nothing automatic. This is the trust root and it is manual
-on purpose. Safety-number comparison is the check, and the invite sheet in the
+on purpose. Comparing the fingerprint is the check, and the invite sheet in the
 UI says so rather than burying it in documentation.
+
+The fingerprint is `blake3("vega:safety-number:v1" ‖ lower account id ‖ higher
+account id)`, ordered so both sides derive the same value with no round trip. It
+is shown two ways, from the one digest: ten words taken a byte at a time (80
+bits), and five groups of five digits (83 bits). Comparing either is the whole
+check — the words exist because a check nobody performs protects nobody, and
+twenty-five digits down a phone line is how that happens.
+
+Note what the fingerprint covers: account ids, which are hashes of root keys. It
+does **not** change when a contact adds or revokes a device. That is the
+sigchain's job, and the sigchain only accepts device changes signed by the root
+key the fingerprint is derived from.
 
 ### H. A malicious contact
 

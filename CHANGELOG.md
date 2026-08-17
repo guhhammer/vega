@@ -24,6 +24,12 @@ each other.
   filesystem plugin, and no permission to read a path it was not handed. A
   received file shows its name, size, arrival progress, and a button that copies
   its path — Vega does not offer to open what a contact sent it.
+- **The safety number can be read as words.** Ten words from a fixed 256-word
+  list, one per byte of the same digest the digits come from — 80 bits, and the
+  same check either way. Twenty-five digits down a phone line is how a
+  verification step stops happening; `atlas hill hasty dress iris gravel fairy
+  cheese crust jockey` is not. Both are shown in the conversation header, and
+  clicking copies them.
 - **Encryption at rest.** Message bodies, contacts, sigchains, queued envelopes,
   partial transfers and received files are now stored sealed with
   XChaCha20-Poly1305 under a subkey of the device key, one subkey per kind so a

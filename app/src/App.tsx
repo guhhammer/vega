@@ -304,11 +304,22 @@ export default function App() {
               >
                 ✎
               </button>
-              <div className="safety">
-                safety number
-                <br />
-                {current.safety_number}
-              </div>
+              {/* Both renderings of one fingerprint. The words lead because
+                  they are the ones somebody will actually read down a phone
+                  line, and a check that gets skipped protects nobody. */}
+              <button
+                className="safety"
+                title="Read these to each other on a call or in person. If they match, nobody swapped your invites. If they do not, someone is in the middle."
+                onClick={() =>
+                  void navigator.clipboard.writeText(
+                    `${current.safety_words}\n${current.safety_number}`,
+                  )
+                }
+              >
+                <span className="safety-label">safety words</span>
+                <span className="safety-words">{current.safety_words}</span>
+                <span className="safety-digits">{current.safety_number}</span>
+              </button>
             </header>
             <Thread
               messages={thread}
@@ -478,7 +489,10 @@ function Thread({
         items.push({
           label: "Open image",
           run: () => {
-            void api.readImage(file.transfer).then(onOpenImage).catch(() => {});
+            void api
+              .readImage(file.transfer)
+              .then(onOpenImage)
+              .catch(() => {});
           },
         });
       }
@@ -876,6 +890,12 @@ function InviteSheet({ me, onClose }: { me: Me; onClose: () => void }) {
           This carries your account id, your contact key and your signed device
           list. Anyone who can swap it in transit can read what follows, so send
           it over a channel you already trust.
+        </p>
+        <p>
+          Once you have each other, read the safety words at the top of the
+          conversation aloud — on a call, or in person. If they match on both
+          screens, nothing was swapped. That comparison is the only thing that
+          rules it out.
         </p>
         <input
           value={name}

@@ -68,22 +68,49 @@ impl Invite {
         Ok(invite)
     }
 
-    /// The short string two people read to each other to confirm no key was
-    /// substituted. Both sides must see the same digits.
-    pub fn safety_number(a: &AccountId, b: &AccountId) -> String {
+    /// The fingerprint both sides compare, before it is rendered.
+    ///
+    /// Ordering the two ids is what makes it symmetric: each person hashes the
+    /// same pair in the same order and gets the same answer, with no round trip
+    /// and nothing to agree on first.
+    fn safety_digest(a: &AccountId, b: &AccountId) -> [u8; 32] {
         let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
         let mut h = blake3::Hasher::new();
         h.update(b"vega:safety-number:v1");
         h.update(lo.as_bytes());
         h.update(hi.as_bytes());
-        let digest = h.finalize();
+        *h.finalize().as_bytes()
+    }
 
-        digest.as_bytes()[..15]
+    /// The short string two people read to each other to confirm no key was
+    /// substituted. Both sides must see the same digits.
+    pub fn safety_number(a: &AccountId, b: &AccountId) -> String {
+        let digest = Self::safety_digest(a, b);
+
+        digest[..15]
             .chunks(3)
             .map(|c| {
                 let n = u32::from(c[0]) << 16 | u32::from(c[1]) << 8 | u32::from(c[2]);
                 format!("{:05}", n % 100_000)
             })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The same fingerprint as words, for saying out loud.
+    ///
+    /// One byte of the digest per word, ten words: 80 bits, which is the usual
+    /// floor for a fingerprint somebody has to be able to forge a collision
+    /// against rather than merely guess. An attacker would have to grind an
+    /// account whose safety phrase with you matches word for word.
+    ///
+    /// It is the *same digest* the digits come from, so the two renderings are
+    /// one check, not two. Comparing either is enough; comparing both adds
+    /// nothing beyond the 80 bits and the 83 already there.
+    pub fn safety_words(a: &AccountId, b: &AccountId) -> String {
+        Self::safety_digest(a, b)[..10]
+            .iter()
+            .map(|byte| crate::words::WORDS[*byte as usize])
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -156,5 +183,37 @@ mod tests {
         assert_eq!(Invite::safety_number(&a, &b), Invite::safety_number(&b, &a));
         assert_ne!(Invite::safety_number(&a, &b), Invite::safety_number(&a, &a));
         assert_eq!(Invite::safety_number(&a, &b).split(' ').count(), 5);
+    }
+
+    #[test]
+    fn the_words_are_the_same_check_as_the_digits() {
+        let a = bootstrap_account("a").unwrap().0.account_id;
+        let b = bootstrap_account("b").unwrap().0.account_id;
+        let c = bootstrap_account("c").unwrap().0.account_id;
+
+        // Symmetric, like the digits: whoever reads them first, both hear the
+        // same phrase.
+        assert_eq!(Invite::safety_words(&a, &b), Invite::safety_words(&b, &a));
+        assert_eq!(Invite::safety_words(&a, &b).split(' ').count(), 10);
+
+        // A different person is a different phrase. This is the whole point:
+        // an invite swapped in transit changes one of the two ids.
+        assert_ne!(Invite::safety_words(&a, &b), Invite::safety_words(&a, &c));
+
+        // Every word comes from the list, so nothing unpronounceable can appear.
+        for word in Invite::safety_words(&a, &b).split(' ') {
+            assert!(
+                crate::words::WORDS.contains(&word),
+                "{word} is not on the list"
+            );
+        }
+
+        // The digits and the words move together, because they are two views of
+        // one digest. If a future change broke that, comparing one and not the
+        // other would silently stop meaning the same thing.
+        assert_eq!(
+            Invite::safety_number(&a, &b) == Invite::safety_number(&a, &c),
+            Invite::safety_words(&a, &b) == Invite::safety_words(&a, &c)
+        );
     }
 }

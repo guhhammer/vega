@@ -3,6 +3,7 @@
 mod invite;
 mod keystore;
 mod runtime;
+mod words;
 
 use runtime::{Received, Runtime};
 use serde::Serialize;
@@ -176,6 +177,9 @@ pub struct ContactView {
     display_name: String,
     verified: bool,
     safety_number: String,
+    /// The same fingerprint as words. Easier to read to somebody than digits,
+    /// and the check people actually perform is the one they will do.
+    safety_words: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -596,6 +600,7 @@ fn view_of(c: &vega_core::Contact, me: &AccountId) -> ContactView {
         display_name: c.display_name.clone(),
         verified: c.verified,
         safety_number: invite::Invite::safety_number(me, &c.account_id),
+        safety_words: invite::Invite::safety_words(me, &c.account_id),
     }
 }
 
