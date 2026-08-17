@@ -5,13 +5,17 @@
 | [`ci.yml`](ci.yml) | push to `main`, every PR | fmt, clippy, tests, frontend build |
 | [`audit.yml`](audit.yml) | dependency changes, weekly | RustSec and npm advisories |
 | [`nightly.yml`](nightly.yml) | nightly, manual | Android cross-compile, docs, release-profile build |
-| [`release.yml`](release.yml) | `v*` tags, manual | Installers for Linux, macOS and Windows on a draft release, plus checksums |
+| [`tag.yml`](tag.yml) | push to `main`, manual | Tags a commit that bumps the version, then calls `release.yml` |
+| [`release.yml`](release.yml) | `v*` tags, `tag.yml`, manual | Installers for Linux, macOS and Windows on a draft release, plus checksums |
 
 ## Why they are split this way
 
-**`ci.yml` is the gate and has to stay fast.** It is exactly what `./make check`
-runs locally, so a green local run means a green CI run — which is the only way
-a pre-commit check actually gets used. Nothing slow belongs here.
+**`ci.yml` is the gate and has to stay fast.** It is what `./make check` runs
+locally, so a green local run means a green CI run — which is the only way a
+pre-commit check actually gets used. Nothing slow belongs here. The one thing it
+adds is a seconds-long `version` job, so that the three files carrying the
+version disagreeing is a red run on the commit that caused it rather than a
+surprise at the moment someone is trying to cut a release.
 
 **`audit.yml` runs on a clock as well as on change.** An advisory published on a
 Tuesday should not wait for the next unrelated commit to be noticed. That is the
@@ -20,6 +24,15 @@ whole reason it is not folded into `ci.yml`.
 **`nightly.yml` holds everything worth knowing but not worth blocking a PR
 for.** An Android cross-compile takes minutes and breaks for reasons unrelated
 to the change in front of you; finding out the next morning is soon enough.
+
+**`tag.yml` exists so that releasing is a version bump rather than a
+command.** It runs on every push to `main` and does nothing at all unless the
+version in the tree has no tag yet, which is what makes it safe to leave switched
+on: the deliberate act is the bump, not the push. Ten commits at the same version
+release nothing; one version change releases exactly once. It has to *call*
+`release.yml` rather than let the pushed tag trigger it, because GitHub will not
+start a workflow from an event another workflow caused — a loop guard that would
+otherwise leave the tag sitting there with nothing built.
 
 **`release.yml` re-runs the tests** even though the tagged commit already passed
 them. Shipping a messenger that fails its own authentication tests would be
@@ -47,7 +60,7 @@ cover files that have finished uploading. See
 
 ## Adding one
 
-Ask which of the four buckets it belongs in before adding a fifth workflow. If
+Ask which of the existing buckets it belongs in before adding another file. If
 it must pass before a merge it goes in `ci.yml`; if it is informational it goes
 in `nightly.yml`. A separate file is for something with a genuinely different
 trigger, not for something with a different name.

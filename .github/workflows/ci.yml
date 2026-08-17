@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+# A newer push makes an in-flight run irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -15,6 +21,41 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  # The workspace Cargo.toml is the version every artifact is named after, and
+  # both tag.yml and release.yml refuse a version the other two files disagree
+  # with. Checking here means drift is caught on the commit that introduced it,
+  # rather than at the moment someone is trying to cut a release.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cargo.toml, package.json, tauri.conf.json and CHANGELOG.md agree
+        run: |
+          set -euo pipefail
+          cargo_version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          pkg_version="$(grep -m1 '"version"' app/package.json | cut -d'"' -f4)"
+          conf_version="$(grep -m1 '"version"' app/src-tauri/tauri.conf.json | cut -d'"' -f4)"
+
+          fail=0
+          if [ "$pkg_version" != "$cargo_version" ]; then
+            echo "::error file=app/package.json::package.json is $pkg_version but the workspace Cargo.toml is $cargo_version"
+            fail=1
+          fi
+          if [ "$conf_version" != "$cargo_version" ]; then
+            echo "::error file=app/src-tauri/tauri.conf.json::tauri.conf.json is $conf_version but the workspace Cargo.toml is $cargo_version"
+            fail=1
+          fi
+          [ "$fail" -eq 0 ] || exit 1
+
+          # A released version needs a section to draw release notes from. A
+          # version still being worked on legitimately has none yet, so this
+          # only warns.
+          if ! grep -q "^## \[$cargo_version\]" CHANGELOG.md; then
+            echo "::warning file=CHANGELOG.md::no CHANGELOG section for $cargo_version yet"
+          fi
+          echo "Version $cargo_version"
+
   rust:
     runs-on: ubuntu-latest
     steps:

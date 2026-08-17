@@ -2,6 +2,10 @@
 #
 #     git tag v1.0.0 && git push origin v1.0.0
 #
+# A tag also arrives on its own: tag.yml watches main and tags any commit that
+# bumps the version, then calls this workflow. Either way what follows is the
+# same, and the version in the workspace Cargo.toml is what decides the name.
+#
 # From there this workflow builds on one runner per platform — Tauri links
 # against the system webview and cannot cross-compile, so there is no way to
 # produce all three from one machine — and attaches the results to a release
@@ -42,6 +46,17 @@ on:
     inputs:
       tag:
         description: "Existing tag to build, e.g. v1.0.0"
+        required: true
+        type: string
+  # How tag.yml starts a release after pushing a tag for a new version. It
+  # cannot rely on the `push: tags` trigger above: a tag pushed by a workflow
+  # using GITHUB_TOKEN deliberately does not start another workflow, which is
+  # how GitHub stops a workflow from triggering itself in a loop. So the release
+  # is invoked directly instead of waiting for an event that will never arrive.
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to build, e.g. v1.0.0"
         required: true
         type: string
 

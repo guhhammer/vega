@@ -1,5 +1,6 @@
 .todo
 .references
+.github-example*
 
 /target
 node_modules/

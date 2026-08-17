@@ -1,0 +1,114 @@
+# Tag on push: a version bump that lands on main becomes a draft release.
+#
+# The manual path still works exactly as before — `git tag -a v1.0.1 -m "Vega
+# 1.0.1" && git push origin v1.0.1`, and release.yml picks it up from its
+# `push: tags` trigger. This is the automatic one, for pushing straight to git
+# instead:
+#
+#     bump Cargo.toml, app/package.json and app/src-tauri/tauri.conf.json
+#       → commit → push to main
+#
+# and the version is tagged and built without anyone running a command. Every
+# other push to main does nothing at all, which is what makes this safe to leave
+# switched on: the deliberate act is the version bump, not the push. Push ten
+# commits at the same version and nothing is released; change the version once
+# and exactly one release starts.
+#
+# What comes out is still a **draft** release. Nothing reaches anyone until it
+# is published by hand from the Releases page, so a bad build costs a discarded
+# draft rather than a recalled download.
+#
+# This does not wait for CI to go green. The two run side by side, and a red CI
+# run next to an unpublished draft is a clear enough signal not to publish it —
+# whereas making the release wait would mean a release that silently never
+# happens when an unrelated job is flaky.
+name: tag
+
+on:
+  push:
+    branches: [main]
+  # For tagging a version that landed while this workflow was broken or off.
+  workflow_dispatch:
+
+# Two pushes in quick succession must not both look, both see no tag, and both
+# try to create it. Not cancel-in-progress: a run that has already pushed a tag
+# needs to reach the release call rather than be killed halfway.
+concurrency:
+  group: tag-main
+  cancel-in-progress: false
+
+# Pushing the tag, and then everything release.yml needs to do with it.
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: tag if the version is new
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      tagged: ${{ steps.check.outputs.tagged }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Every tag, not just the tip: deciding whether this version has been
+          # released before is the entire point of the job, and a shallow clone
+          # carries none of them.
+          fetch-depth: 0
+
+      - id: check
+        run: |
+          set -euo pipefail
+
+          version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          pkg="$(grep -m1 '"version"' app/package.json | cut -d'"' -f4)"
+          conf="$(grep -m1 '"version"' app/src-tauri/tauri.conf.json | cut -d'"' -f4)"
+          tag="v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          # The same agreement release.yml demands of a tag. Checking it before
+          # the tag exists means a half-finished bump is a red run on the commit
+          # that caused it, rather than a tag that has to be deleted.
+          fail=0
+          if [ "$pkg" != "$version" ]; then
+            echo "::error file=app/package.json::package.json is $pkg but the workspace Cargo.toml is $version"
+            fail=1
+          fi
+          if [ "$conf" != "$version" ]; then
+            echo "::error file=app/src-tauri/tauri.conf.json::tauri.conf.json is $conf but the workspace Cargo.toml is $version"
+            fail=1
+          fi
+          [ "$fail" -eq 0 ] || exit 1
+
+          # Already released, or already tagged by hand — the ordinary case for
+          # most pushes, and not a failure.
+          if git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
+            echo "tagged=false" >> "$GITHUB_OUTPUT"
+            echo "$tag already exists — nothing to release."
+            exit 0
+          fi
+
+          # Annotated, and worded the same as a tag pushed by hand, so the two
+          # paths leave the same history behind.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Vega $version"
+          git push origin "$tag"
+
+          echo "tagged=true" >> "$GITHUB_OUTPUT"
+          echo "Tagged $(git rev-parse --short HEAD) as $tag."
+
+  # The tag is pushed with GITHUB_TOKEN, and GitHub does not start a workflow
+  # from an event a workflow caused — so release.yml's `push: tags` trigger will
+  # not fire for it. Calling it here is what closes that gap; the build jobs, the
+  # draft release and the checksums are all release.yml's, unchanged.
+  release:
+    name: release
+    needs: tag
+    if: needs.tag.outputs.tagged == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+    permissions:
+      contents: write
+    secrets: inherit

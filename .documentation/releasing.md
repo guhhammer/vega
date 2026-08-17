@@ -15,15 +15,39 @@ Then:
    deciding whether to trust this, and a stale one is worse than none.
 3. **README.** The "what is built" table matches reality.
 4. **`done/`** has a file for every commit since the last tag.
-5. **Tag.** `git tag -a vX.Y.Z -m "..."` and push it. `release.yml` builds
-   bundles for Linux, macOS and Windows as a **draft** release.
+5. **Push.** The bump landing on `main` is the release. `tag.yml` tags that
+   commit `vX.Y.Z` and calls `release.yml`, which builds bundles for Linux,
+   macOS and Windows as a **draft** release. Tagging by hand still works —
+   `git tag -a vX.Y.Z -m "Vega X.Y.Z" && git push origin vX.Y.Z` — and lands in
+   the same place; `tag.yml` sees the tag already exists and stands aside.
 6. **Draft.** Read what the workflow produced before publishing. It re-runs the
    tests, but a green build is not the same as a release worth shipping.
 
-The version check in step 1 is enforced, not trusted: the workflow's first job
-compares the tag against all three files and stops in seconds if any disagrees,
-rather than after three platform builds have produced installers whose names
-contradict the release they hang under.
+The version check in step 1 is enforced, not trusted, and in three places: `ci.yml`
+compares the three files on every push, `tag.yml` compares them again before
+creating a tag, and `release.yml`'s first job compares the tag against all three
+and stops in seconds if any disagrees — rather than after three platform builds
+have produced installers whose names contradict the release they hang under.
+
+## Why a push releases
+
+Every push to `main` runs `tag.yml`, and it does nothing at all unless the
+version in the tree has no tag yet. That is what makes it safe to leave switched
+on: the deliberate act is the version bump, not the push. Ten commits at the same
+version release nothing; one version change releases exactly once.
+
+Nothing reaches anyone automatically. What the run produces is a draft, so a bad
+build costs a discarded draft rather than a recalled download.
+
+It does not wait for CI. The two run side by side, and a red `ci.yml` run next to
+an unpublished draft is a clear enough signal not to publish it — whereas making
+the release wait would mean a release that silently never happens whenever an
+unrelated job is flaky.
+
+`tag.yml` has to invoke `release.yml` directly rather than let its own pushed tag
+trigger it. A tag pushed by a workflow using `GITHUB_TOKEN` deliberately does not
+start another workflow, which is how GitHub stops a workflow from triggering
+itself in a loop; without the call the tag would sit there with nothing built.
 
 ## What the workflow produces
 
