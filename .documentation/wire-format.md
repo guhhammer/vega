@@ -128,12 +128,66 @@ server: it rides inside the ratchet, so it is private and authenticated.
 { "type": "text",      "text": "…" }
 { "type": "receipt",   "message_id": "7a8b…" }
 { "type": "self_copy", "to": "a1b2…", "message_id": "7a8b…", "text": "…" }
+{ "type": "file",       "file": { … } }
+{ "type": "file_chunk", "file": { … }, "index": 0, "data": "base64" }
 ```
 
 `self_copy` is how multi-device sync works without a server — a copy of an
 outgoing message addressed to the sender's own devices. **Only accepted when the
 authenticated sender is your own account**; otherwise a contact could plant
 messages among the things you said.
+
+### Files
+
+A file is one `file` message, which is what a thread shows, followed by `chunks`
+separate `file_chunk` messages carrying the bytes. Each is an ordinary message:
+ratcheted, sealed and routed like any other, so a relay cannot tell a file from a
+sentence.
+
+```json
+"file": {
+  "transfer": "3c4d…",       // 32 random bytes, hex — names the transfer
+  "name":     "holiday.jpg", // the sender's word, never used as a path unsanitised
+  "size":     2097152,
+  "hash":     "9e1f…",       // blake3 of the whole file
+  "chunks":   21
+}
+```
+
+The manifest is repeated **on every chunk**, at a cost of a few hundred bytes
+against a 96 KiB payload. Nothing orders these messages — a retry, or a mailbox
+handing back what it held, can deliver the last chunk before the announcement —
+so any chunk must be able to open the transfer. Without that, an early chunk
+would be dropped for belonging to a transfer nobody had announced yet, and the
+file would never complete or explain why.
+
+Every number in the manifest is the sender's claim, and each is checked once when
+the transfer opens: `chunks` must be exactly what `size` implies, and `size` must
+be within `MAX_FILE_BYTES`. Everything after that — that an index is in range,
+that a chunk is chunk-sized, that the total cannot exceed the limit — follows.
+The `hash` is verified after reassembly; a file that fails is discarded along
+with the transfer rather than written anywhere.
+
+`name` is the most obviously hostile field in the protocol: `../../.ssh/authorized_keys`
+is a valid JSON string. It is reduced to a single harmless path component before
+it reaches a filesystem, and each transfer is written into its own directory
+named after `transfer`, so two files called `photo.jpg` cannot overwrite each
+other.
+
+Chunks are not messages. They are not shown, not receipted, and not copied to the
+sender's own devices — a self-copy would double a ten-megabyte send. **A file
+therefore does not appear on the sender's other devices**, which is the one place
+files behave differently from text.
+
+#### What a file costs an offline recipient
+
+A mailbox holds `MAX_PARKED_PER_TAG` = 32 envelopes for one tag, so roughly 3 MB
+of file will wait for someone who is offline. Past that the remaining chunks stay
+in the sender's outbox and go out when the recipient reappears — the transfer
+completes, it just needs both ends up at once. Those caps are deliberately not
+raised for files: every parked envelope is a stranger's disk being used, and a
+messenger that lets one person park ten megabytes with a volunteer is a messenger
+nobody volunteers for.
 
 ## Derived values
 
@@ -266,6 +320,9 @@ Everything a stranger can cause us to allocate is bounded.
 | Limit | Value | Why |
 |---|---|---|
 | `MAX_ENVELOPE_BYTES` | 256 KiB | The ceiling on one message |
+| `MAX_FILE_BYTES` | 10 MiB | Largest file, ≈107 chunks. A courtesy limit: every chunk is an envelope somebody else's node may carry |
+| `FILE_CHUNK_BYTES` | 96 KiB | Raw bytes per chunk. Base64 into the content JSON and the two base64 layers below it cost ≈2.4× on the wire, landing a full chunk near 235 KiB |
+| `MAX_FILE_NAME_BYTES` | 255 | Longest file name accepted from a peer |
 | `MAX_REQUEST_BYTES` | 272 KiB | Envelope plus framing, enforced by the codec before parsing |
 | `MAX_RESPONSE_BYTES` | 8 MiB | A full mailbox for one tag |
 | `MAX_PARK_SECS` | 7 days | Longest a mailbox will hold anything |

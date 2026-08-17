@@ -456,6 +456,48 @@ mod tests {
         )
     }
 
+    /// Every layer between the keyboard and the wire has to be byte-transparent:
+    /// the ratchet takes bytes, the JSON above it takes a `String`, and neither
+    /// is allowed to normalise, re-encode or truncate what it carries. Emoji are
+    /// the visible case, but the ones that actually break implementations are
+    /// combining marks (where a naive length check splits a grapheme) and
+    /// astral-plane characters (four bytes, two UTF-16 units — the pair that
+    /// tempts a byte offset to land mid-character).
+    #[test]
+    fn utf8_survives_the_round_trip_unchanged() {
+        // Family-by-ZWJ, a skin-tone modifier, combining acute, RTL, CJK, and a
+        //字 outside the basic plane.
+        let hairy = "👩‍👩‍👧 👋🏽 e\u{0301} مرحبا 日本語 𝔘𝔫𝔦𝔠𝔬𝔡𝔢 🇧🇷";
+
+        let mut a = Peer::new("alice-laptop");
+        let mut b = Peer::new("bob-laptop");
+
+        let b_state = b.state();
+        let pw_ab = a.pairwise_with(&b);
+        let to_b = Recipient {
+            account: b.identity.account_id,
+            state: &b_state,
+            pairwise: &pw_ab,
+        };
+
+        let msg = text(&b, hairy);
+        let envelopes = fan_out(&mut a.identity, &mut a.sessions, &to_b, None, &msg, NOW).unwrap();
+
+        // Through bytes and back, so the JSON encoding is exercised rather than
+        // a struct being handed across in memory.
+        let wire = envelopes[0].1.to_bytes().unwrap();
+        let env = Envelope::from_bytes(&wire).unwrap();
+
+        let both = TestDirectory(vec![a.state(), b_state.clone()]);
+        let opened = b.sessions.decrypt(&mut b.identity, &env, &both).unwrap();
+
+        // Byte-for-byte, not merely "looks the same": a normalising layer would
+        // fold e + combining acute into é and still pass an eyeball comparison.
+        let got = opened.content.text().unwrap();
+        assert_eq!(got, hairy);
+        assert_eq!(got.as_bytes(), hairy.as_bytes());
+    }
+
     #[test]
     fn two_strangers_can_hold_a_conversation() {
         let mut a = Peer::new("alice-laptop");

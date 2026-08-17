@@ -6,7 +6,7 @@ resolver = "2"
 version = "1.0.0"
 edition = "2021"
 rust-version = "1.85"
-authors = ["Gustavo Hammerschmidt"]
+authors = ["The Vega contributors"]
 license = "MIT"
 
 # Lints live here rather than in RUSTFLAGS so they apply the same way to

@@ -13,9 +13,8 @@ type: software
 license: MIT
 repository-code: https://github.com/guhhammer/vega
 authors:
-  - alias: guhhammer
-    family-names: Hammerschmidt
-    given-names: Gustavo
+  # An entity rather than a person: this project is cited by its name.
+  - name: The Vega contributors
 keywords:
   - end-to-end encryption
   - peer-to-peer

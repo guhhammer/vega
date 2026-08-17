@@ -98,7 +98,7 @@ mod tests {
         let (identity, chain) = bootstrap_account("laptop").unwrap();
         Invite {
             account_id: identity.account_id,
-            display_name: "Gustavo".into(),
+            display_name: "Ada".into(),
             contact_key: identity.contact_public(),
             chain,
         }

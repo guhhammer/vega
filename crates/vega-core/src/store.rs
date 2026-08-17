@@ -11,7 +11,10 @@ use crate::identity::{AccountId, DeviceId, Identity, IdentityPickle};
 use crate::keys::DhKey;
 use crate::session::Sessions;
 use crate::sigchain::Sigchain;
-use redb::{Database, MultimapTableDefinition, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{
+    Database, MultimapTableDefinition, ReadableDatabase, ReadableMultimapTable, ReadableTable,
+    ReadableTableMetadata, TableDefinition,
+};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -26,8 +29,17 @@ const BY_CONVERSATION: MultimapTableDefinition<&str, u64> =
     MultimapTableDefinition::new("by_conversation");
 const SEEN: TableDefinition<&[u8], u64> = TableDefinition::new("seen");
 const OUTBOX: TableDefinition<u64, &[u8]> = TableDefinition::new("outbox");
+/// Files being received, by transfer id. A manifest arrives before its chunks
+/// and the chunks arrive in whatever order the network delivers them, so a
+/// partial transfer has to survive a restart like anything else.
+const TRANSFERS: TableDefinition<&str, &[u8]> = TableDefinition::new("transfers");
+/// `<transfer hex>/<index, zero-padded>` → the raw chunk. Separate from the
+/// manifest so a chunk arriving does not rewrite the whole record.
+const TRANSFER_CHUNKS: TableDefinition<&str, &[u8]> = TableDefinition::new("transfer_chunks");
 
 const KEY_IDENTITY: &str = "identity";
+/// A name for this device chosen locally. Never leaves the machine.
+const KEY_DEVICE_LABEL: &str = "device_label";
 const KEY_MESSAGE_SEQ: &str = "message_seq";
 const KEY_OUTBOX_SEQ: &str = "outbox_seq";
 
@@ -83,6 +95,70 @@ pub struct OutboxItem {
     pub message_id: [u8; 32],
 }
 
+/// A file being received, assembled one chunk at a time.
+///
+/// Every field except `have` and `started_at` is the sender's claim, copied from
+/// the manifest. They are checked once, when the transfer begins, so that
+/// nothing downstream has to trust them again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Transfer {
+    #[serde(with = "crate::identity::hex32")]
+    pub transfer: [u8; 32],
+    pub from: AccountId,
+    /// The thread this file belongs to, decided by us from the sender — never
+    /// from the conversation field the sender wrote.
+    pub conversation: AccountId,
+    pub name: String,
+    pub size: u64,
+    #[serde(with = "crate::identity::hex32")]
+    pub hash: [u8; 32],
+    pub chunks: u32,
+    /// How many distinct chunks have arrived.
+    pub have: u32,
+    /// Set once the file has been reassembled and handed over.
+    ///
+    /// The record outlives the chunks on purpose. A chunk can open a transfer,
+    /// so the announcement may well arrive after the last chunk — and if
+    /// completion were recorded by deleting the transfer, that late
+    /// announcement would open a second, empty one and the file would show as
+    /// still arriving forever.
+    #[serde(default)]
+    pub done: bool,
+    pub started_at: u64,
+}
+
+impl Transfer {
+    /// Open a transfer from a manifest, whichever message carried it — the
+    /// announcement or any one of the chunks.
+    ///
+    /// `conversation` is decided by the caller from the authenticated sender,
+    /// never read from the message: a contact must not be able to drop a file
+    /// into a thread with somebody else.
+    pub fn opening(
+        manifest: &crate::envelope::FileManifest,
+        from: AccountId,
+        conversation: AccountId,
+        now: u64,
+    ) -> Self {
+        Self {
+            transfer: manifest.transfer,
+            from,
+            conversation,
+            name: crate::envelope::safe_file_name(&manifest.name),
+            size: manifest.size,
+            hash: manifest.hash,
+            chunks: manifest.chunks,
+            have: 0,
+            done: false,
+            started_at: now,
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.have >= self.chunks
+    }
+}
+
 pub struct Store {
     db: Database,
 }
@@ -109,6 +185,8 @@ impl Store {
             tx.open_multimap_table(BY_CONVERSATION)?;
             tx.open_table(SEEN)?;
             tx.open_table(OUTBOX)?;
+            tx.open_table(TRANSFERS)?;
+            tx.open_table(TRANSFER_CHUNKS)?;
         }
         tx.commit()?;
         Ok(Self { db })
@@ -294,6 +372,125 @@ impl Store {
         Ok(out)
     }
 
+    /// How many messages each conversation holds, largest first.
+    ///
+    /// Read from the index alone, so it costs nothing to show for an account
+    /// with years of history behind it.
+    pub fn message_counts(&self) -> Result<Vec<(AccountId, usize)>> {
+        let tx = self.db.begin_read()?;
+        let index = tx.open_multimap_table(BY_CONVERSATION)?;
+        let mut out = Vec::new();
+        for row in index.iter()? {
+            let (key, seqs) = row?;
+            let Ok(account) = AccountId::from_display(key.value()) else {
+                continue;
+            };
+            out.push((account, seqs.count()));
+        }
+        out.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(out)
+    }
+
+    /// Delete one conversation's messages, and any file transfers filed under
+    /// it. Returns how many messages went.
+    ///
+    /// The replay set is deliberately left alone: forgetting that these ids were
+    /// seen would let the same ciphertext, still sitting in a mailbox, put the
+    /// conversation back. Clearing history is not the same as agreeing to
+    /// receive it again.
+    ///
+    /// The outbox is left alone too. A message already handed over is on its
+    /// way, and quietly cancelling it would tell the sender something untrue
+    /// about what the other person is going to see.
+    pub fn clear_conversation(&self, other: &AccountId) -> Result<usize> {
+        let key = other.to_display();
+        let tx = self.db.begin_write()?;
+        let removed = {
+            let mut index = tx.open_multimap_table(BY_CONVERSATION)?;
+            let seqs: Vec<u64> = index
+                .get(key.as_str())?
+                .filter_map(|v| v.ok().map(|v| v.value()))
+                .collect();
+
+            let mut messages = tx.open_table(MESSAGES)?;
+            for seq in &seqs {
+                messages.remove(*seq)?;
+            }
+            index.remove_all(key.as_str())?;
+            seqs.len()
+        };
+        tx.commit()?;
+
+        for transfer in self.transfers_in(other)? {
+            self.drop_transfer(&transfer)?;
+        }
+        Ok(removed)
+    }
+
+    /// Delete every message in every conversation, and every file transfer.
+    pub fn clear_all_messages(&self) -> Result<usize> {
+        let tx = self.db.begin_write()?;
+        let removed = {
+            let mut messages = tx.open_table(MESSAGES)?;
+            let count = usize::try_from(messages.len()?).unwrap_or(usize::MAX);
+            messages.retain(|_, _| false)?;
+
+            // A multimap has no retain, so the keys are collected first and
+            // dropped one at a time. There is one key per conversation, not one
+            // per message, so the list is small whatever the history.
+            let mut index = tx.open_multimap_table(BY_CONVERSATION)?;
+            let keys: Vec<String> = index
+                .iter()?
+                .filter_map(|row| row.ok().map(|(k, _)| k.value().to_string()))
+                .collect();
+            for key in keys {
+                index.remove_all(key.as_str())?;
+            }
+
+            let mut transfers = tx.open_table(TRANSFERS)?;
+            transfers.retain(|_, _| false)?;
+            let mut chunks = tx.open_table(TRANSFER_CHUNKS)?;
+            chunks.retain(|_, _| false)?;
+            count
+        };
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// The transfers filed under one conversation.
+    fn transfers_in(&self, other: &AccountId) -> Result<Vec<[u8; 32]>> {
+        let tx = self.db.begin_read()?;
+        let t = tx.open_table(TRANSFERS)?;
+        let mut out = Vec::new();
+        for row in t.iter()? {
+            let (_, v) = row?;
+            let state: Transfer = serde_json::from_slice(v.value())?;
+            if state.conversation == *other {
+                out.push(state.transfer);
+            }
+        }
+        Ok(out)
+    }
+
+    // ---- this device ----
+
+    /// A name for this device chosen here, which nothing else ever sees.
+    ///
+    /// The label inside the sigchain is signed and travels with the device
+    /// record, so it cannot be edited after the fact without invalidating the
+    /// entry that carries it. This is the local override instead: it changes
+    /// what *this* installation calls itself, and no contact learns of it.
+    pub fn set_device_label(&self, label: &str) -> Result<()> {
+        self.put_meta(KEY_DEVICE_LABEL, label.as_bytes())
+    }
+
+    pub fn device_label(&self) -> Result<Option<String>> {
+        let Some(raw) = self.get_meta(KEY_DEVICE_LABEL)? else {
+            return Ok(None);
+        };
+        Ok(String::from_utf8(raw).ok().filter(|s| !s.trim().is_empty()))
+    }
+
     /// Drop every queued envelope carrying this message.
     ///
     /// Called when the recipient confirms they decrypted it, which is the only
@@ -337,6 +534,233 @@ impl Store {
         }
         tx.commit()?;
         Ok(removed)
+    }
+
+    // ---- file transfers ----
+
+    /// Record a manifest and start accepting its chunks.
+    ///
+    /// This is the one place the sender's numbers are checked. Past here every
+    /// bound the rest of the code relies on — that a transfer cannot exceed
+    /// [`crate::envelope::MAX_FILE_BYTES`], that an index is within range, that
+    /// a chunk is chunk-sized — follows from `chunks` agreeing with `size`.
+    ///
+    /// Returns `false` if this transfer is already known, which is what a
+    /// replayed or re-sent manifest looks like.
+    pub fn begin_transfer(&self, t: &Transfer) -> Result<bool> {
+        if crate::envelope::chunk_count(t.size) != Some(t.chunks) {
+            return Err(Error::Wire(format!(
+                "a manifest claiming {} bytes in {} chunks is not self-consistent",
+                t.size, t.chunks
+            )));
+        }
+        if t.name.is_empty() {
+            return Err(Error::Wire("a file manifest with no name".into()));
+        }
+
+        let key = hex(&t.transfer);
+        let tx = self.db.begin_write()?;
+        let fresh = {
+            let mut table = tx.open_table(TRANSFERS)?;
+            if table.get(key.as_str())?.is_some() {
+                false
+            } else {
+                table.insert(key.as_str(), serde_json::to_vec(t)?.as_slice())?;
+                true
+            }
+        };
+        tx.commit()?;
+        Ok(fresh)
+    }
+
+    pub fn get_transfer(&self, transfer: &[u8; 32]) -> Result<Option<Transfer>> {
+        let tx = self.db.begin_read()?;
+        let t = tx.open_table(TRANSFERS)?;
+        let Some(v) = t.get(hex(transfer).as_str())? else {
+            return Ok(None);
+        };
+        Ok(Some(serde_json::from_slice(v.value())?))
+    }
+
+    /// File one chunk.
+    ///
+    /// `None` means there is no such transfer open. Otherwise the transfer comes
+    /// back as it now stands, whether or not this chunk counted for anything —
+    /// a duplicate of the last chunk still leaves a complete transfer, and the
+    /// caller should see that.
+    ///
+    /// A chunk that is oversized, out of range, or one we already hold is
+    /// ignored rather than treated as an error: the same envelope legitimately
+    /// arrives twice over two tiers, so a duplicate is ordinary traffic, and
+    /// quietly refusing junk is the whole job of this function.
+    pub fn put_chunk(
+        &self,
+        transfer: &[u8; 32],
+        index: u32,
+        data: &[u8],
+    ) -> Result<Option<Transfer>> {
+        let key = hex(transfer);
+        let tx = self.db.begin_write()?;
+        let updated = {
+            let mut manifests = tx.open_table(TRANSFERS)?;
+            let Some(raw) = manifests.get(key.as_str())? else {
+                return Ok(None);
+            };
+            let mut state: Transfer = serde_json::from_slice(raw.value())?;
+            drop(raw);
+
+            let usable = if index >= state.chunks {
+                tracing::warn!(
+                    index,
+                    chunks = state.chunks,
+                    "ignored an out-of-range chunk"
+                );
+                false
+            } else if data.len() > crate::envelope::FILE_CHUNK_BYTES {
+                tracing::warn!(len = data.len(), "ignored an oversized file chunk");
+                false
+            } else {
+                true
+            };
+
+            if usable {
+                let mut chunks = tx.open_table(TRANSFER_CHUNKS)?;
+                let chunk_key = chunk_key(&key, index);
+                // Not counted twice, which is what would otherwise let one chunk
+                // sent repeatedly "complete" a transfer it never filled.
+                if chunks.get(chunk_key.as_str())?.is_none() {
+                    chunks.insert(chunk_key.as_str(), data)?;
+                    state.have += 1;
+                    manifests.insert(key.as_str(), serde_json::to_vec(&state)?.as_slice())?;
+                }
+            }
+            Some(state)
+        };
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    /// Reassemble a completed transfer and verify it.
+    ///
+    /// `Ok(None)` means there is nothing to hand over: the transfer is unknown,
+    /// still missing chunks, or was already taken. Only the first caller to
+    /// complete a transfer gets the bytes, so a duplicate of the final chunk
+    /// cannot produce the file twice.
+    ///
+    /// An assembled file whose hash or length disagrees with its manifest is
+    /// discarded along with the transfer: the sender is a contact, but a contact
+    /// whose bytes do not add up has either a bug or an intention, and neither
+    /// deserves a file on disk.
+    pub fn take_file(&self, transfer: &[u8; 32]) -> Result<Option<(Transfer, Vec<u8>)>> {
+        let Some(mut state) = self.get_transfer(transfer)? else {
+            return Ok(None);
+        };
+        if !state.is_complete() || state.done {
+            return Ok(None);
+        }
+
+        let key = hex(transfer);
+        // A hint only, and the size is a sender's claim — so a value that does
+        // not fit this machine's usize costs a few reallocations, not a panic.
+        let mut file = Vec::with_capacity(usize::try_from(state.size).unwrap_or(0));
+        {
+            let tx = self.db.begin_read()?;
+            let chunks = tx.open_table(TRANSFER_CHUNKS)?;
+            for index in 0..state.chunks {
+                let Some(v) = chunks.get(chunk_key(&key, index).as_str())? else {
+                    // `have` said otherwise, so the store is inconsistent rather
+                    // than the transfer incomplete.
+                    self.drop_transfer(transfer)?;
+                    return Err(Error::Storage(format!("chunk {index} of {key} is missing")));
+                };
+                file.extend_from_slice(v.value());
+            }
+        }
+
+        // Whatever happens now, these bytes are not needed again: either they
+        // check out and the caller takes them, or they do not and the transfer
+        // is over.
+        self.drop_chunks(transfer, state.chunks)?;
+
+        if file.len() as u64 != state.size {
+            self.drop_transfer(transfer)?;
+            return Err(Error::Wire(format!(
+                "{} reassembled to {} bytes, not the {} it announced",
+                state.name,
+                file.len(),
+                state.size
+            )));
+        }
+        if *blake3::hash(&file).as_bytes() != state.hash {
+            self.drop_transfer(transfer)?;
+            return Err(Error::Wire(format!("{} failed its hash check", state.name)));
+        }
+
+        // The record stays behind, marked done. It is how a manifest arriving
+        // after the last chunk recognises a file that is already here.
+        state.done = true;
+        let tx = self.db.begin_write()?;
+        {
+            let mut manifests = tx.open_table(TRANSFERS)?;
+            manifests.insert(
+                hex(transfer).as_str(),
+                serde_json::to_vec(&state)?.as_slice(),
+            )?;
+        }
+        tx.commit()?;
+
+        Ok(Some((state, file)))
+    }
+
+    /// Forget a transfer and every chunk of it.
+    pub fn drop_transfer(&self, transfer: &[u8; 32]) -> Result<()> {
+        let key = hex(transfer);
+        let expected = match self.get_transfer(transfer)? {
+            Some(state) => state.chunks,
+            None => 0,
+        };
+        let tx = self.db.begin_write()?;
+        {
+            tx.open_table(TRANSFERS)?.remove(key.as_str())?;
+        }
+        tx.commit()?;
+        self.drop_chunks(transfer, expected)
+    }
+
+    /// Throw away the stored pieces, keeping the record of the transfer itself.
+    fn drop_chunks(&self, transfer: &[u8; 32], expected: u32) -> Result<()> {
+        let key = hex(transfer);
+        let tx = self.db.begin_write()?;
+        {
+            let mut chunks = tx.open_table(TRANSFER_CHUNKS)?;
+            for index in 0..expected {
+                chunks.remove(chunk_key(&key, index).as_str())?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Transfers abandoned before they finished.
+    ///
+    /// A sender who goes offline halfway leaves chunks behind, and without this
+    /// they would sit in the database until the account is deleted.
+    pub fn prune_transfers(&self, now: u64, keep_secs: u64) -> Result<usize> {
+        let cutoff = now.saturating_sub(keep_secs);
+        let stale: Vec<[u8; 32]> = {
+            let tx = self.db.begin_read()?;
+            let t = tx.open_table(TRANSFERS)?;
+            t.iter()?
+                .filter_map(|row| row.ok())
+                .filter_map(|(_, v)| serde_json::from_slice::<Transfer>(v.value()).ok())
+                .filter(|t| t.started_at < cutoff)
+                .map(|t| t.transfer)
+                .collect()
+        };
+        for transfer in &stale {
+            self.drop_transfer(transfer)?;
+        }
+        Ok(stale.len())
     }
 
     // ---- outbox ----
@@ -412,6 +836,17 @@ impl Store {
     }
 }
 
+fn hex(bytes: &[u8; 32]) -> String {
+    data_encoding::HEXLOWER.encode(bytes)
+}
+
+/// Zero-padded so the keys of one transfer sort in chunk order, which is what
+/// makes a range scan over them meaningful even though reassembly indexes
+/// directly.
+fn chunk_key(transfer_hex: &str, index: u32) -> String {
+    format!("{transfer_hex}/{index:08}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,6 +859,152 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("vega.redb")).unwrap();
         (store, dir)
+    }
+
+    fn transfer_of(data: &[u8]) -> Transfer {
+        Transfer {
+            transfer: [5u8; 32],
+            from: AccountId([1u8; 32]),
+            conversation: AccountId([1u8; 32]),
+            name: "notes 📓.txt".into(),
+            size: data.len() as u64,
+            hash: *blake3::hash(data).as_bytes(),
+            chunks: crate::envelope::chunk_count(data.len() as u64).unwrap(),
+            have: 0,
+            done: false,
+            started_at: NOW,
+        }
+    }
+
+    fn chunks_of(data: &[u8]) -> Vec<&[u8]> {
+        data.chunks(crate::envelope::FILE_CHUNK_BYTES).collect()
+    }
+
+    #[test]
+    fn a_file_is_reassembled_from_chunks_in_any_order() {
+        let (store, _dir) = store();
+        // Two and a bit chunks, so ordering and the short final chunk both matter.
+        let data: Vec<u8> = (0..crate::envelope::FILE_CHUNK_BYTES * 2 + 17)
+            .map(|i| i.to_le_bytes()[0] ^ i.to_le_bytes()[1])
+            .collect();
+        let state = transfer_of(&data);
+        assert_eq!(state.chunks, 3);
+        assert!(store.begin_transfer(&state).unwrap());
+
+        // Backwards, because the network does not promise order.
+        let pieces = chunks_of(&data);
+        for index in (0..state.chunks).rev() {
+            let progress = store
+                .put_chunk(&state.transfer, index, pieces[index as usize])
+                .unwrap()
+                .expect("the transfer is open");
+            assert_eq!(progress.have, state.chunks - index);
+        }
+
+        let (finished, file) = store.take_file(&state.transfer).unwrap().unwrap();
+        assert_eq!(file, data);
+        assert_eq!(finished.name, "notes 📓.txt");
+        assert!(finished.done);
+
+        // The record stays, marked done, so a manifest arriving after the last
+        // chunk finds a finished transfer rather than opening an empty one.
+        let after = store.get_transfer(&state.transfer).unwrap().unwrap();
+        assert!(after.done);
+        assert!(
+            !store.begin_transfer(&transfer_of(&data)).unwrap(),
+            "a late manifest must not reopen a finished transfer"
+        );
+        // And the bytes are handed over exactly once.
+        assert!(store.take_file(&state.transfer).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_same_chunk_twice_does_not_complete_a_transfer() {
+        let (store, _dir) = store();
+        let data: Vec<u8> = vec![7; crate::envelope::FILE_CHUNK_BYTES + 1];
+        let state = transfer_of(&data);
+        assert_eq!(state.chunks, 2);
+        store.begin_transfer(&state).unwrap();
+
+        let pieces = chunks_of(&data);
+        for _ in 0..5 {
+            let progress = store
+                .put_chunk(&state.transfer, 0, pieces[0])
+                .unwrap()
+                .unwrap();
+            assert_eq!(progress.have, 1, "a duplicate must not count again");
+        }
+        assert!(
+            store.take_file(&state.transfer).unwrap().is_none(),
+            "a transfer missing a chunk is not complete"
+        );
+    }
+
+    #[test]
+    fn junk_chunks_are_ignored_rather_than_stored() {
+        let (store, _dir) = store();
+        let data = vec![1u8; 64];
+        let state = transfer_of(&data);
+        store.begin_transfer(&state).unwrap();
+
+        // Past the end of the file.
+        let progress = store.put_chunk(&state.transfer, 9, &data).unwrap().unwrap();
+        assert_eq!(progress.have, 0);
+        // Larger than a chunk is allowed to be.
+        let huge = vec![0u8; crate::envelope::FILE_CHUNK_BYTES + 1];
+        let progress = store.put_chunk(&state.transfer, 0, &huge).unwrap().unwrap();
+        assert_eq!(progress.have, 0);
+        // For a transfer nobody announced.
+        assert!(store.put_chunk(&[0xaa; 32], 0, &data).unwrap().is_none());
+        // None of that junk left the transfer completable.
+        assert!(store.take_file(&state.transfer).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_manifest_whose_own_numbers_disagree_is_refused() {
+        let (store, _dir) = store();
+        let data = vec![1u8; 100];
+
+        let mut lying = transfer_of(&data);
+        lying.chunks = 400; // 100 bytes is one chunk, not four hundred.
+        assert!(store.begin_transfer(&lying).is_err());
+
+        let mut too_big = transfer_of(&data);
+        too_big.size = crate::envelope::MAX_FILE_BYTES + 1;
+        assert!(store.begin_transfer(&too_big).is_err());
+
+        let mut nameless = transfer_of(&data);
+        nameless.name = String::new();
+        assert!(store.begin_transfer(&nameless).is_err());
+    }
+
+    #[test]
+    fn a_file_that_does_not_match_its_hash_is_thrown_away() {
+        let (store, _dir) = store();
+        let data = vec![3u8; 200];
+        let mut state = transfer_of(&data);
+        state.hash = [0u8; 32]; // Not the hash of anything we are about to send.
+        store.begin_transfer(&state).unwrap();
+        store.put_chunk(&state.transfer, 0, &data).unwrap();
+
+        assert!(store.take_file(&state.transfer).is_err());
+        assert!(
+            store.get_transfer(&state.transfer).unwrap().is_none(),
+            "a failed transfer is dropped, not left to be retried forever"
+        );
+    }
+
+    #[test]
+    fn abandoned_transfers_are_pruned() {
+        let (store, _dir) = store();
+        let data = vec![9u8; 128];
+        let state = transfer_of(&data);
+        store.begin_transfer(&state).unwrap();
+        store.put_chunk(&state.transfer, 0, &data).unwrap();
+
+        assert_eq!(store.prune_transfers(NOW, 3600).unwrap(), 0, "still fresh");
+        assert_eq!(store.prune_transfers(NOW + 7200, 3600).unwrap(), 1);
+        assert!(store.get_transfer(&state.transfer).unwrap().is_none());
     }
 
     #[test]

@@ -24,13 +24,16 @@ pub mod sigchain;
 pub mod store;
 pub mod tag;
 
-pub use envelope::{Body, Content, Envelope};
+pub use envelope::{
+    chunk_count, safe_file_name, Body, Content, Envelope, FileManifest, FILE_CHUNK_BYTES,
+    MAX_FILE_BYTES,
+};
 pub use error::{Error, Result};
 pub use identity::{AccountId, DeviceId, DeviceRecord, Identity, PrekeyBundle};
 pub use keys::{DhKey, Sig, VerifyKey};
 pub use session::{fan_out, Directory, Opened, Recipient, Sessions};
 pub use sigchain::{ChainState, Sigchain};
-pub use store::{Contact, OutboxItem, Store, StoredMessage};
+pub use store::{Contact, OutboxItem, Store, StoredMessage, Transfer};
 pub use tag::{epoch_at, Pairwise, Tag, EPOCH_SECS};
 
 /// Seconds since the unix epoch.

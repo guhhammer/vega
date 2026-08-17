@@ -15,6 +15,31 @@ use serde::{Deserialize, Serialize};
 
 pub const WIRE_VERSION: u8 = 1;
 
+/// The largest file Vega will send.
+///
+/// Not a storage limit — a courtesy one. Every chunk is a separate envelope that
+/// somebody else's node may end up carrying or holding, and a messenger that
+/// lets one person push arbitrary volume through a stranger's relay is a
+/// messenger nobody will run a relay for.
+pub const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Raw file bytes per chunk.
+///
+/// The ceiling that matters is `vega_net::protocol::MAX_ENVELOPE_BYTES` (256
+/// KiB), and the path from here to there multiplies: base64 into the content
+/// JSON (×4/3), then the Olm ciphertext is base64'd into the inner JSON and the
+/// sealed box base64'd again into the envelope (×1.79 measured). So a chunk
+/// costs about 2.4× its own size on the wire, and 96 KiB lands near 235 KiB with
+/// room to spare. `chunk_envelope_fits_on_the_wire` in vega-net is what actually
+/// holds the two numbers together — this comment would rot, that test cannot.
+pub const FILE_CHUNK_BYTES: usize = 96 * 1024;
+
+/// Longest file name accepted from a peer, in bytes.
+///
+/// Long enough for any real name including non-ASCII, short enough that it
+/// cannot be used to bloat a manifest or a directory entry.
+pub const MAX_FILE_NAME_BYTES: usize = 255;
+
 /// The outermost layer. Everything a relay or mailbox peer can read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Envelope {
@@ -110,6 +135,110 @@ pub enum Body {
         message_id: [u8; 32],
         text: String,
     },
+
+    /// Announces a file. The bytes follow as `chunks` separate [`Body::FileChunk`]
+    /// messages, because one envelope cannot hold more than 256 KiB.
+    ///
+    /// This is the message a thread shows. It is not what *opens* a transfer —
+    /// the chunks carry their own copy of the manifest for that.
+    File {
+        file: FileManifest,
+    },
+
+    /// One piece of a file, and never a message in its own right: chunks are
+    /// not shown, not receipted, and not copied to the sender's own devices.
+    ///
+    /// The manifest rides along on every chunk, at a cost of a few hundred bytes
+    /// against a 96 KiB payload. That buys the property that matters on a
+    /// network with no ordering guarantee: any chunk can open the transfer, so a
+    /// chunk overtaking the manifest — a retry, a mailbox handing back what it
+    /// held in whatever order it liked — is ordinary rather than fatal. Without
+    /// it, an early chunk would be dropped for belonging to a transfer nobody
+    /// had announced yet, and the file would never complete or explain why.
+    FileChunk {
+        file: FileManifest,
+        index: u32,
+        #[serde(with = "bytes_b64")]
+        data: Vec<u8>,
+    },
+}
+
+/// Everything needed to open a file transfer.
+///
+/// Every field is the sender's word. `size` and `chunks` are checked against
+/// [`MAX_FILE_BYTES`] before a byte is allocated, `name` is never used as a path
+/// without [`safe_file_name`], and `hash` is what finally decides whether the
+/// reassembled file is the one that was announced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileManifest {
+    #[serde(with = "crate::identity::hex32")]
+    pub transfer: [u8; 32],
+    pub name: String,
+    pub size: u64,
+    /// blake3 of the whole file, verified after reassembly.
+    #[serde(with = "crate::identity::hex32")]
+    pub hash: [u8; 32],
+    pub chunks: u32,
+}
+
+/// Turn a name a peer chose into something safe to use as one path component.
+///
+/// A file name arrives from whoever sent it, which makes it the most obviously
+/// hostile field in the protocol: `../../.ssh/authorized_keys` is a valid JSON
+/// string. Everything that could steer a write somewhere it was not meant to go
+/// is removed here, and the result is always exactly one component.
+pub fn safe_file_name(name: &str) -> String {
+    // Both separators, on every platform: a name minted on Windows still has to
+    // be safe when it is written on Linux, and vice versa.
+    let last = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .trim_matches(|c: char| c.is_control() || c.is_whitespace());
+
+    let mut cleaned: String = last
+        .chars()
+        // NUL truncates a path in every C API underneath us; the rest are
+        // refused outright by NTFS and would only invite quoting bugs elsewhere.
+        .filter(|c| !c.is_control() && !matches!(c, '\0' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .collect();
+
+    // Byte-bounded, but cut on a character boundary — truncating mid-emoji would
+    // produce a name that is not valid UTF-8 to anything downstream.
+    if cleaned.len() > MAX_FILE_NAME_BYTES {
+        let cut = cleaned
+            .char_indices()
+            .take_while(|(i, c)| i + c.len_utf8() <= MAX_FILE_NAME_BYTES)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        cleaned.truncate(cut);
+    }
+
+    // Windows refuses a name ending in a dot or a space, silently trimming it —
+    // which would make the name on disk differ from the name that was checked.
+    let cleaned = cleaned.trim_end_matches(['.', ' ']);
+
+    // `.` and `..` are directory traversal even without a separator.
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        return "file".to_string();
+    }
+
+    // Device names are reserved on Windows whatever the extension, and opening
+    // one talks to hardware rather than to a file.
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let stem = cleaned.split('.').next().unwrap_or_default();
+    if RESERVED
+        .iter()
+        .any(|r| stem.eq_ignore_ascii_case(r) && !stem.is_empty())
+    {
+        return format!("_{cleaned}");
+    }
+
+    cleaned.to_string()
 }
 
 impl Content {
@@ -137,9 +266,35 @@ impl Content {
         match &self.body {
             Body::Text { text } => Some(text),
             Body::SelfCopy { text, .. } => Some(text),
-            Body::Receipt { .. } => None,
+            Body::Receipt { .. } | Body::File { .. } | Body::FileChunk { .. } => None,
         }
     }
+
+    /// The manifest, for a message that announces a file.
+    ///
+    /// A chunk is deliberately not a file message: it carries a manifest, but it
+    /// is not something a thread shows.
+    pub fn file(&self) -> Option<&FileManifest> {
+        match &self.body {
+            Body::File { file } => Some(file),
+            _ => None,
+        }
+    }
+}
+
+/// How many chunks a file of this size is split into.
+///
+/// Returns `None` for a size past [`MAX_FILE_BYTES`], so the caller cannot get
+/// as far as allocating for a file it was never going to accept.
+pub fn chunk_count(size: u64) -> Option<u32> {
+    if size == 0 || size > MAX_FILE_BYTES {
+        return None;
+    }
+    let per = FILE_CHUNK_BYTES as u64;
+    // Ceiling division. 10 MiB over 96 KiB is 107, nowhere near the top of a
+    // u32 — but the conversion is checked rather than asserted in a comment, so
+    // that raising MAX_FILE_BYTES can never quietly wrap this.
+    u32::try_from(size.div_ceil(per)).ok()
 }
 
 mod tag_hex {
@@ -200,6 +355,119 @@ mod tests {
     fn garbage_does_not_panic() {
         for junk in [&b""[..], b"{", b"null", b"[1,2,3]", &[0xff, 0xfe][..]] {
             assert!(Envelope::from_bytes(junk).is_err());
+        }
+    }
+
+    /// The name in a manifest is written by whoever sent it. These are the
+    /// shapes that turn a file name into a write somewhere else entirely.
+    #[test]
+    fn a_hostile_file_name_becomes_one_harmless_component() {
+        for hostile in [
+            "../../.ssh/authorized_keys",
+            "..\\..\\Windows\\System32\\drivers\\etc\\hosts",
+            "/etc/passwd",
+            "..",
+            ".",
+            "",
+            "   ",
+            "with\0nul",
+            "trailing dots...",
+            "CON",
+            "nul.txt",
+        ] {
+            let safe = safe_file_name(hostile);
+            assert!(!safe.is_empty(), "{hostile:?} produced an empty name");
+            assert!(!safe.contains('/'), "{hostile:?} kept a separator");
+            assert!(!safe.contains('\\'), "{hostile:?} kept a separator");
+            assert!(!safe.contains('\0'), "{hostile:?} kept a NUL");
+            assert_ne!(safe, "..");
+            assert_ne!(safe, ".");
+            assert_eq!(
+                std::path::Path::new(&safe).components().count(),
+                1,
+                "{hostile:?} produced more than one path component"
+            );
+        }
+
+        // Reserved device names survive as files rather than as devices.
+        assert_eq!(safe_file_name("CON"), "_CON");
+        assert_eq!(safe_file_name("nul.txt"), "_nul.txt");
+        // The traversal is stripped, the actual name is kept.
+        assert_eq!(
+            safe_file_name("../../.ssh/authorized_keys"),
+            "authorized_keys"
+        );
+    }
+
+    /// Names are UTF-8 like everything else here, and the length cap is in bytes
+    /// while the characters it cuts are not one byte each.
+    #[test]
+    fn a_long_emoji_name_is_cut_on_a_character_boundary() {
+        let name = format!("{}.png", "🙂".repeat(200));
+        let safe = safe_file_name(&name);
+        assert!(safe.len() <= MAX_FILE_NAME_BYTES);
+        // The real assertion: it is still a valid Rust string, which it could
+        // not be if the cut had landed inside one of those four-byte characters.
+        assert!(safe.chars().all(|c| c == '🙂'));
+        assert_eq!(safe_file_name("café ☕.txt"), "café ☕.txt");
+    }
+
+    #[test]
+    fn chunk_counts_cover_the_edges() {
+        assert_eq!(chunk_count(0), None, "an empty file has nothing to send");
+        assert_eq!(chunk_count(1), Some(1));
+        assert_eq!(chunk_count(FILE_CHUNK_BYTES as u64), Some(1));
+        assert_eq!(chunk_count(FILE_CHUNK_BYTES as u64 + 1), Some(2));
+        assert_eq!(chunk_count(MAX_FILE_BYTES), Some(107));
+        assert_eq!(chunk_count(MAX_FILE_BYTES + 1), None);
+        assert_eq!(chunk_count(u64::MAX), None);
+    }
+
+    #[test]
+    fn a_file_body_round_trips_with_its_chunks() {
+        let manifest = FileManifest {
+            transfer: [7u8; 32],
+            name: "holiday 🏖️.jpg".into(),
+            size: 200_000,
+            hash: [9u8; 32],
+            chunks: 2,
+        };
+        let content = Content::new(
+            AccountId([3u8; 32]),
+            0,
+            0,
+            Body::File {
+                file: manifest.clone(),
+            },
+        );
+        let back: Content = serde_json::from_slice(&serde_json::to_vec(&content).unwrap()).unwrap();
+        let info = back.file().expect("a file body reports its manifest");
+        assert_eq!(info, &manifest);
+        assert_eq!(info.name, "holiday 🏖️.jpg");
+        assert_eq!(back.text(), None, "a file is not text");
+
+        let chunk = Content::new(
+            AccountId([3u8; 32]),
+            0,
+            1,
+            Body::FileChunk {
+                file: manifest.clone(),
+                index: 1,
+                data: vec![0xff; 1024],
+            },
+        );
+        let back: Content = serde_json::from_slice(&serde_json::to_vec(&chunk).unwrap()).unwrap();
+        assert!(
+            back.file().is_none(),
+            "a chunk carries a manifest but is not a file message"
+        );
+        match back.body {
+            Body::FileChunk { data, index, file } => {
+                assert_eq!(index, 1);
+                assert_eq!(data, vec![0xff; 1024]);
+                assert_eq!(file, manifest, "the chunk must be able to open a transfer");
+            }
+            _ => panic!("wrong body"),
         }
     }
 

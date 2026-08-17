@@ -31,6 +31,12 @@ pub enum Error {
     #[error("malformed wire data: {0}")]
     Wire(String),
 
+    /// A file cannot be sent as it stands. Unlike the rest of these, this one is
+    /// written to be read by whoever picked the file, so it carries the whole
+    /// sentence rather than a prefix and a detail.
+    #[error("{0}")]
+    File(String),
+
     #[error("storage: {0}")]
     Storage(String),
 

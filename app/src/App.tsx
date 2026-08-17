@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
+  MAX_FILE_BYTES,
   onMessage,
   onNetwork,
+  toBase64,
   type Contact,
   type Me,
   type Message,
@@ -75,6 +77,30 @@ export default function App() {
     }
   };
 
+  const sendFile = async (file: File) => {
+    if (!active) return;
+    setFault(null);
+    // Checked here so a file that was never going to be sent is refused before
+    // it is read. Rust refuses it again, and that is the check that counts.
+    if (file.size > MAX_FILE_BYTES) {
+      setFault(
+        `${file.name} is ${formatSize(file.size)} — Vega sends at most ${formatSize(MAX_FILE_BYTES)}.`,
+      );
+      return;
+    }
+    if (file.size === 0) {
+      setFault(`${file.name} is empty.`);
+      return;
+    }
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      await api.sendFile(active, file.name, toBase64(bytes));
+      await refreshThread(active);
+    } catch (e) {
+      setFault(String(e));
+    }
+  };
+
   return (
     <div className="app" data-view={active ? "chat" : "list"}>
       <aside className="sidebar">
@@ -133,8 +159,12 @@ export default function App() {
               </div>
             </header>
             <Thread messages={thread} />
-            {fault && <div className="error" style={{ padding: "0 1rem" }}>{fault}</div>}
-            <Composer onSend={send} />
+            {fault && (
+              <div className="error" style={{ padding: "0 1rem" }}>
+                {fault}
+              </div>
+            )}
+            <Composer onSend={send} onSendFile={sendFile} />
           </>
         ) : (
           <div className="empty">
@@ -164,6 +194,19 @@ export default function App() {
   );
 }
 
+/** Bytes as something a person reads, not as a number of bytes. */
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB"];
+  let size = bytes / 1024;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size < 10 ? size.toFixed(1) : Math.round(size)} ${units[unit]}`;
+}
+
 function Thread({ messages }: { messages: Message[] }) {
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -174,7 +217,7 @@ function Thread({ messages }: { messages: Message[] }) {
     <div className="thread">
       {messages.map((m) => (
         <div key={m.id} className={m.outgoing ? "bubble mine" : "bubble"}>
-          {m.text}
+          {m.file ? <FileBubble file={m.file} /> : m.text}
           <time>{new Date(m.at * 1000).toLocaleTimeString()}</time>
         </div>
       ))}
@@ -183,8 +226,48 @@ function Thread({ messages }: { messages: Message[] }) {
   );
 }
 
-function Composer({ onSend }: { onSend: (text: string) => void }) {
+function FileBubble({ file }: { file: NonNullable<Message["file"]> }) {
+  const [copied, setCopied] = useState(false);
+  const done = file.path !== null;
+
+  return (
+    <div className="file">
+      <div className="file-name">{file.name}</div>
+      <div className="file-meta">
+        {done
+          ? formatSize(file.size)
+          : `${formatSize(file.size)} · piece ${file.have} of ${file.chunks}`}
+      </div>
+      {done ? (
+        // No opener: granting the app a shell or filesystem plugin to launch
+        // whatever a contact sent would be a strange thing for this program to
+        // do. The path is here to be copied into whatever you trust to open it.
+        <button
+          className="file-path"
+          title={file.path ?? ""}
+          onClick={async () => {
+            await navigator.clipboard.writeText(file.path ?? "");
+            setCopied(true);
+          }}
+        >
+          {copied ? "Path copied" : "Copy path"}
+        </button>
+      ) : (
+        <progress value={file.have} max={file.chunks} />
+      )}
+    </div>
+  );
+}
+
+function Composer({
+  onSend,
+  onSendFile,
+}: {
+  onSend: (text: string) => void;
+  onSendFile: (file: File) => void;
+}) {
   const [text, setText] = useState("");
+  const picker = useRef<HTMLInputElement>(null);
 
   const submit = () => {
     const trimmed = text.trim();
@@ -195,6 +278,27 @@ function Composer({ onSend }: { onSend: (text: string) => void }) {
 
   return (
     <div className="composer">
+      {/* The picker lives in the page rather than in a native dialog, which is
+          what keeps the app's capability list empty: no filesystem plugin, no
+          permission to read a path Vega was not handed. */}
+      <input
+        ref={picker}
+        type="file"
+        hidden
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) onSendFile(file);
+          // Cleared so picking the same file twice in a row still fires.
+          e.target.value = "";
+        }}
+      />
+      <button
+        className="attach"
+        title="Send a file"
+        onClick={() => picker.current?.click()}
+      >
+        +
+      </button>
       <textarea
         value={text}
         placeholder="Write a message"

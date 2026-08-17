@@ -109,6 +109,7 @@ key that can read anything, and cannot withhold a message it never sees.
 | T4 mailbox park/collect | done, tested over real sockets |
 | T1 hole punching, T3 relay | wired end to end, but only two machines on two real networks can prove it |
 | Delivery receipts | done, tested — the outbox clears when the recipient confirms decryption, not when a peer accepts bytes |
+| Files, up to 10 MB | done, tested — sent as 96 KiB chunks, each an ordinary sealed message, reassembled and hash-checked on arrival. Not copied to the sender's own devices, and anything past ~3 MB needs both people online at once |
 | Key storage | platform keyring (Secret Service / Keychain / Credential Manager), with a 0600 file where none exists |
 | Device linking (second device on one account) | the crypto is there — `Identity::adopt`, and the sigchain accepts device-signed additions — but there is no pairing flow, so an account is one device today |
 | Android | cross-compiles; foreground service and multicast lock plugins not written (see `.documentation/android.md`) |

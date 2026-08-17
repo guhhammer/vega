@@ -14,8 +14,11 @@
   --mine: #1d3b42;
   --warn: #e4785c;
 
-  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
-  --sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --mono:
+    ui-monospace, "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", Menlo,
+    Consolas, monospace;
+  --sans:
+    ui-sans-serif, system-ui, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
 
   --radius: 10px;
 }
@@ -296,6 +299,40 @@ button:focus-visible {
   margin-top: 0.2rem;
 }
 
+/* A file in the thread. The name leads, because that is what identifies it;
+   the size and progress are secondary and set in the same mono face as every
+   other machine-generated fact in this interface. */
+.file {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  /* Bubbles are pre-wrap for text; a file is laid out, not typed. */
+  white-space: normal;
+}
+
+.file-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.file-meta {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--ink-2);
+}
+
+.file progress {
+  width: 100%;
+  height: 0.3rem;
+  accent-color: var(--accent);
+}
+
+.file-path {
+  align-self: flex-start;
+  font-size: 0.7rem;
+  padding: 0.2rem 0.5rem;
+}
+
 .composer {
   display: flex;
   gap: 0.5rem;
@@ -308,6 +345,15 @@ button:focus-visible {
   resize: none;
   min-height: 2.6rem;
   max-height: 8rem;
+}
+
+/* Square, so it reads as an action next to the text area rather than as a
+   second Send. */
+.attach {
+  flex: 0 0 auto;
+  width: 2.6rem;
+  font-size: 1.1rem;
+  line-height: 1;
 }
 
 /* ---- empty states, dialogs ---- */

@@ -5,6 +5,7 @@
 #
 #   ./make check    types + lints + tests          (the one to run constantly)
 #   ./make test     tests only
+#   ./make build    compile everything, no lints or tests
 #   ./make fmt      rewrite Rust and TS in place
 #   ./make dev      run the desktop app against the vite dev server
 #   ./make dist     build this machine's installers into release/
@@ -13,9 +14,10 @@
 #   ./make clean    delete build artifacts
 #   ./make all      fmt, check, dist
 #
-# `cargo build` on its own leaves binaries that are proof the code compiles, not
-# applications: without the Tauri CLI there is no frontend embedded, so the
-# window opens on "could not connect to localhost". Use `dev` or `dist`.
+# `cargo build` — and so `./make build` — leaves binaries that are proof the code
+# compiles, not applications: without the Tauri CLI there is no frontend
+# embedded, so the window opens on "could not connect to localhost". Use `dev` or
+# `dist` to get something that runs.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -40,7 +42,8 @@ host() {
 }
 
 # The version every artifact is named after. One source of truth, checked
-# against package.json and tauri.conf.json by release.yml before a tag builds.
+# against package.json and tauri.conf.json by ci.yml on every push, and again by
+# tag.yml and release.yml before a tag builds.
 version() { grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2; }
 
 # Copy one bundle into release/ under its download name. Exactly one file is
@@ -76,6 +79,20 @@ case "${1:-check}" in
 
   test)
     cargo test --workspace
+    ;;
+
+  build)
+    # Compilation only — no lints, no tests, no bundling. `check` is the gate and
+    # `dist` is the product; this is for the times the question is just whether a
+    # wide change still compiles, on both halves, without waiting for the rest.
+    #
+    # Not `--all-targets`: tests and benches compiling is `check`'s business, and
+    # building them here would be most of the cost of `check` for none of the
+    # answer. `npm run build` type-checks before it bundles, so the frontend half
+    # is the same command ci.yml runs.
+    cargo build --workspace
+    ensure_npm
+    (cd app && npm run build)
     ;;
 
   dev)
@@ -157,8 +174,9 @@ case "${1:-check}" in
       mac)     echo "Still missing: Linux AppImage and .deb, Windows setup .exe." ;;
       windows) echo "Still missing: Linux AppImage and .deb, macOS .dmg." ;;
     esac
-    echo "Those cannot be cross-compiled here. Push a v* tag and release.yml"
-    echo "builds all three on CI and attaches them to a draft release."
+    echo "Those cannot be cross-compiled here. Land a version bump on main — or"
+    echo "push a v* tag — and CI builds all three, attaching them to a draft"
+    echo "release."
     ;;
 
   android)
@@ -189,7 +207,10 @@ case "${1:-check}" in
 
   *)
     echo "unknown task: $1" >&2
-    sed -n '3,20p' "$0" >&2
+    # The header above, ending where the code starts. Anchored rather than a
+    # line range, so adding a task cannot leave this printing half a paragraph.
+    # The `;` before `}` is redundant under GNU sed and required by the BSD one.
+    sed -n '3,/^set -euo/{ /^set -euo/!p; }' "$0" >&2
     exit 1
     ;;
 esac

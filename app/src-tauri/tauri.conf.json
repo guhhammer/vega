@@ -34,7 +34,7 @@
       "icons/icon.ico"
     ],
     "category": "SocialNetworking",
-    "publisher": "Gustavo Hammerschmidt",
+    "publisher": "The Vega contributors",
     "homepage": "https://github.com/guhhammer/vega",
     "license": "MIT",
     "shortDescription": "An encrypted messenger with no server.",

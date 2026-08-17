@@ -181,6 +181,82 @@ async fn two_accounts_exchange_an_encrypted_message_over_the_network() {
     );
 }
 
+/// The one place that holds `FILE_CHUNK_BYTES` and `MAX_ENVELOPE_BYTES`
+/// together.
+///
+/// vega-core picks the chunk size and cannot see the wire limit; vega-net
+/// enforces the wire limit and does not know what a file is. Nothing but this
+/// test connects the two, and without it a chunk size raised for throughput
+/// would produce envelopes that every peer silently refuses — a file transfer
+/// that never completes and never says why.
+#[tokio::test]
+async fn a_full_chunk_envelope_fits_on_the_wire() {
+    let (mut alice, _alice_chain) = bootstrap_account("alice-laptop").unwrap();
+    let (bob, bob_chain) = bootstrap_account("bob-laptop").unwrap();
+    let mut alice_sessions = Sessions::new();
+
+    let bob_state = bob_chain.validate().unwrap();
+    let pairwise = alice.pairwise_with(&bob_state.contact, &bob.account_id);
+    let now = vega_core::now();
+
+    // A chunk carrying every byte it is allowed to carry, of incompressible
+    // data — a run of zeroes would be a fine chunk and a useless measurement.
+    let data: Vec<u8> = (0..vega_core::FILE_CHUNK_BYTES)
+        .map(|i| i.wrapping_mul(31).to_le_bytes()[0] ^ (i >> 3).to_le_bytes()[1])
+        .collect();
+    let content = Content::new(
+        bob.account_id,
+        now,
+        1,
+        Body::FileChunk {
+            // A worst-case manifest: the longest name a peer may send, since
+            // that is what rides along on every chunk.
+            file: vega_core::FileManifest {
+                transfer: [0xab; 32],
+                name: "n".repeat(255),
+                size: vega_core::MAX_FILE_BYTES,
+                hash: [0xcd; 32],
+                chunks: 107,
+            },
+            index: 0,
+            data,
+        },
+    );
+
+    let envelopes = fan_out(
+        &mut alice,
+        &mut alice_sessions,
+        &Recipient {
+            account: bob.account_id,
+            state: &bob_state,
+            pairwise: &pairwise,
+        },
+        None,
+        &content,
+        now,
+    )
+    .unwrap();
+
+    let wire = envelopes[0].1.to_bytes().unwrap();
+    assert!(
+        wire.len() <= vega_net::protocol::MAX_ENVELOPE_BYTES,
+        "a full chunk makes a {} byte envelope, over the {} byte limit — \
+         lower FILE_CHUNK_BYTES",
+        wire.len(),
+        vega_net::protocol::MAX_ENVELOPE_BYTES
+    );
+
+    // A pre-key envelope is the largest form: it carries the material that opens
+    // a session. Later chunks on an established session are smaller, so proving
+    // the first one fits proves they all do.
+    let headroom = vega_net::protocol::MAX_ENVELOPE_BYTES - wire.len();
+    assert!(
+        headroom >= 8 * 1024,
+        "only {headroom} bytes of headroom under the wire limit; too tight to \
+         absorb a protocol field being added later"
+    );
+}
+
 #[tokio::test]
 async fn a_stranger_on_the_same_network_learns_nothing() {
     let (mut alice, alice_chain) = bootstrap_account("alice").unwrap();

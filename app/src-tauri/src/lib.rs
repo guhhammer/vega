@@ -24,6 +24,37 @@ type Shared = Arc<Mutex<Runtime>>;
 struct Ctx {
     shared: Shared,
     net: NodeHandle,
+    /// Where completed file transfers are written. Kept here rather than derived
+    /// on demand so that exactly one place decides where files go.
+    files: Arc<std::path::PathBuf>,
+}
+
+/// Where a transfer's bytes live once they are whole.
+///
+/// One directory per transfer id: two people sending `photo.jpg` must not
+/// overwrite each other, and a transfer id is the only name in the protocol
+/// guaranteed to be unique. The file inside keeps the name it was sent under,
+/// which is what makes the path worth showing to somebody.
+fn file_path(root: &std::path::Path, transfer: &[u8; 32], name: &str) -> std::path::PathBuf {
+    root.join(data_encoding::HEXLOWER.encode(transfer))
+        // Sanitised on arrival already. Done again here because this is the call
+        // that turns a name into a filesystem write, and a check at the point of
+        // use survives a caller being added later that forgot the first one.
+        .join(vega_core::safe_file_name(name))
+}
+
+fn write_file(
+    root: &std::path::Path,
+    transfer: &[u8; 32],
+    name: &str,
+    bytes: &[u8],
+) -> std::io::Result<std::path::PathBuf> {
+    let path = file_path(root, transfer, name);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, bytes)?;
+    Ok(path)
 }
 
 // ---------------------------------------------------------------- views
@@ -51,6 +82,21 @@ pub struct MessageView {
     text: String,
     outgoing: bool,
     at: u64,
+    /// Present when this message is a file rather than text.
+    file: Option<FileView>,
+}
+
+/// A file message, as far as the UI needs to know.
+#[derive(Debug, Serialize)]
+pub struct FileView {
+    name: String,
+    size: u64,
+    /// Where it is on disk, once all of it is. `None` while it is still coming.
+    path: Option<String>,
+    /// Chunks held out of chunks expected — the progress bar, and the reason
+    /// this view is computed per read rather than stored with the message.
+    have: u32,
+    chunks: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -125,6 +171,37 @@ async fn send_message(to: String, text: String, ctx: State<'_, Ctx>) -> Result<(
     Ok(())
 }
 
+/// Send a file. `data` is the file base64-encoded, because that is what survives
+/// the JSON hop from the web view without a plugin or a filesystem permission —
+/// the picker runs in the page, so Vega never gets to read a path of its own.
+#[tauri::command]
+async fn send_file(
+    to: String,
+    name: String,
+    data: String,
+    ctx: State<'_, Ctx>,
+) -> Result<(), String> {
+    let bytes = data_encoding::BASE64
+        .decode(data.as_bytes())
+        .map_err(|_| "that file did not survive the trip from the picker".to_string())?;
+
+    let account = AccountId::from_display(&to).map_err(fail)?;
+    let transfer = {
+        let mut rt = ctx.shared.lock().await;
+        rt.send_file(&account, &name, &bytes).map_err(fail)?
+    };
+
+    // The sender's own copy, under the same name and path the recipient will
+    // use, so a file looks the same in both threads.
+    if let Err(e) = write_file(&ctx.files, &transfer, &name, &bytes) {
+        // Queued and on its way regardless; only our local copy is missing.
+        tracing::warn!(error = %e, "could not keep a local copy of a sent file");
+    }
+
+    flush(&ctx).await;
+    Ok(())
+}
+
 #[tauri::command]
 async fn conversation(with: String, ctx: State<'_, Ctx>) -> Result<Vec<MessageView>, String> {
     let account = AccountId::from_display(&with).map_err(fail)?;
@@ -135,12 +212,41 @@ async fn conversation(with: String, ctx: State<'_, Ctx>) -> Result<Vec<MessageVi
         .map_err(fail)?
         .into_iter()
         .filter_map(|m| {
-            m.content.text().map(|t| MessageView {
-                id: data_encoding::HEXLOWER.encode(&m.content.id[..8]),
-                text: t.to_string(),
+            let id = data_encoding::HEXLOWER.encode(&m.content.id[..8]);
+            let common = |text: String, file: Option<FileView>| MessageView {
+                id: id.clone(),
+                text,
                 outgoing: m.outgoing,
                 at: m.content.sent_at,
-            })
+                file,
+            };
+
+            if let Some(info) = m.content.file() {
+                let path = file_path(&ctx.files, &info.transfer, &info.name);
+                // Progress is read here rather than stored on the message,
+                // because it changes without the message changing. A transfer
+                // marked done, or pruned away entirely, is finished — and in
+                // both cases the file on disk is what actually settles it.
+                let (have, on_disk) = match rt.store.get_transfer(&info.transfer) {
+                    Ok(Some(open)) if !open.done => (open.have, false),
+                    _ => {
+                        let there = path.is_file();
+                        (if there { info.chunks } else { 0 }, there)
+                    }
+                };
+                return Some(common(
+                    String::new(),
+                    Some(FileView {
+                        name: info.name.to_string(),
+                        size: info.size,
+                        path: on_disk.then(|| path.display().to_string()),
+                        have,
+                        chunks: info.chunks,
+                    }),
+                ));
+            }
+
+            m.content.text().map(|t| common(t.to_string(), None))
         })
         .collect())
 }
@@ -237,11 +343,17 @@ async fn build_ctx(data_dir: std::path::PathBuf) -> Result<Ctx, String> {
     }
     runtime.sweep();
 
+    // Created up front: a file arriving is not the moment to discover that the
+    // directory it goes in cannot be made.
+    let files = data_dir.join("files");
+    std::fs::create_dir_all(&files).map_err(fail)?;
+
     // The event pump is started by `run` once the runtime is shared.
     EVENTS.with(|slot| *slot.borrow_mut() = Some(events));
     Ok(Ctx {
         shared: Arc::new(Mutex::new(runtime)),
         net,
+        files: Arc::new(files),
     })
 }
 
@@ -368,18 +480,35 @@ async fn announce(ctx: &Ctx) -> usize {
 async fn pump(app: AppHandle, ctx: Ctx, mut events: tokio::sync::mpsc::Receiver<NetEvent>) {
     while let Some(event) = events.recv().await {
         // Scoped so the lock is gone before anything below touches the network.
-        let (connected, decrypted) = {
+        let (connected, decrypted, arrived) = {
             let mut rt = ctx.shared.lock().await;
             rt.on_net_event(&event);
-            let decrypted = match &event {
+            let (decrypted, arrived) = match &event {
                 NetEvent::Envelope { bytes, .. } => match rt.receive(bytes) {
-                    Received::Message(conversation) => Some(conversation),
-                    _ => None,
+                    Received::Message(conversation) => (Some(conversation), None),
+                    Received::File {
+                        conversation,
+                        transfer,
+                        name,
+                        bytes,
+                    } => (Some(conversation), Some((transfer, name, bytes))),
+                    _ => (None, None),
                 },
-                _ => None,
+                _ => (None, None),
             };
-            (rt.connected_count(), decrypted)
+            (rt.connected_count(), decrypted, arrived)
         };
+
+        // Written with the lock released: a ten-megabyte write must not hold up
+        // decryption of everything behind it.
+        if let Some((transfer, name, bytes)) = arrived {
+            match write_file(&ctx.files, &transfer, &name, &bytes) {
+                Ok(path) => tracing::info!(path = %path.display(), "saved a file"),
+                // The transfer is gone from the store either way, so this file
+                // is lost rather than resumable. Saying so is all that is left.
+                Err(e) => tracing::error!(error = %e, %name, "could not save a received file"),
+            }
+        }
 
         if let Some(conversation) = decrypted {
             let _ = app.emit(EVT_MESSAGE, conversation.to_display());
@@ -568,6 +697,7 @@ pub fn run() {
             add_contact,
             list_contacts,
             send_message,
+            send_file,
             conversation,
             network,
         ])

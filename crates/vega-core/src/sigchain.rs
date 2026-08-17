@@ -432,7 +432,7 @@ mod tests {
     /// An account with its first device registered — the normal starting point.
     fn account() -> (Identity, Sigchain) {
         let mut me = Identity::create("laptop");
-        let mut chain = Sigchain::genesis(&me, "gustavo", now()).unwrap();
+        let mut chain = Sigchain::genesis(&me, "ada", now()).unwrap();
         chain
             .append_signed_by_root(&me, Body::AddDevice(me.device_record(now())), now())
             .unwrap();

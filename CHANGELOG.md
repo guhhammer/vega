@@ -9,6 +9,44 @@ stable** and may break between releases — the version number tracks the
 application, not a protocol guarantee, and two different builds may not talk to
 each other.
 
+## [Unreleased]
+
+### Added
+
+- **Files, up to 10 MB.** A file is sent as an announcement plus its bytes in
+  96 KiB chunks, each an ordinary ratcheted, sealed message — so a relay cannot
+  tell a file from a sentence, and files inherit the same encryption, routing and
+  retries as text. The receiver reassembles, checks a blake3 hash against the
+  announcement, and writes the result under the app data directory. A file that
+  fails its hash is discarded rather than written.
+- **An attach button in the composer.** The picker runs inside the page rather
+  than as a native dialog, so the application's capability list stays empty: no
+  filesystem plugin, and no permission to read a path it was not handed. A
+  received file shows its name, size, arrival progress, and a button that copies
+  its path — Vega does not offer to open what a contact sent it.
+- **Automatic tagging.** A version bump landing on `main` is now tagged and built
+  into a draft release without anyone running a command. See
+  [tag.yml](.github/workflows/tag.yml) and
+  [releasing.md](.documentation/releasing.md).
+- **`./make build`** — compile both halves without lints, tests or bundling.
+
+### Changed
+
+- **The wire format gained two body types**, `file` and `file_chunk`. This breaks
+  compatibility with 1.0.0: a 1.0.0 build receiving a file message cannot parse
+  it. Text messages between the two versions are unaffected.
+- **CI checks that the three version files agree** on every push, rather than
+  only when a release is being cut.
+
+### Known limitations
+
+- **A file does not appear on the sender's other devices.** Text is copied to
+  them; a file is not, because a self-copy would double a ten-megabyte send.
+- **A file larger than about 3 MB needs both people online at once.** A mailbox
+  holds 32 envelopes for one recipient, and the rest waits in the sender's outbox
+  until the recipient reappears. Those caps were deliberately not raised for
+  files: every parked envelope is a volunteer's disk.
+
 ## [1.0.0] — 2026-08-16
 
 A packaging and distribution release. The protocol, crypto and transport code
