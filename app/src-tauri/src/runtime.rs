@@ -915,7 +915,7 @@ mod tests {
     /// dropping it deletes the database out from under the runtime.
     fn runtime(label: &str) -> (Runtime, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("vega.redb")).unwrap();
+        let store = Store::open(dir.path().join("vega.redb"), PICKLE).unwrap();
         let (identity, chain) = bootstrap_account(label).unwrap();
         store.save_identity(&identity, &PICKLE).unwrap();
         store.save_chain(&identity.account_id, &chain).unwrap();

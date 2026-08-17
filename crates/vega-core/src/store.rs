@@ -5,6 +5,7 @@
 //! `pickle_key` the caller supplies; this crate never decides where that key
 //! lives, because on a real install it belongs in the platform keystore.
 
+use crate::at_rest::{self, purpose};
 use crate::envelope::Content;
 use crate::error::{Error, Result};
 use crate::identity::{AccountId, DeviceId, Identity, IdentityPickle};
@@ -161,6 +162,9 @@ impl Transfer {
 
 pub struct Store {
     db: Database,
+    /// The device key, used to encrypt everything user-visible that goes in.
+    /// See [`crate::at_rest`] for what that protects and what it does not.
+    key: [u8; 32],
 }
 
 impl std::fmt::Debug for Store {
@@ -171,7 +175,9 @@ impl std::fmt::Debug for Store {
 }
 
 impl Store {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+    /// Open the database, encrypting everything written from here on with
+    /// `key` — the same device key the identity and sessions are pickled with.
+    pub fn open(path: impl AsRef<Path>, key: [u8; 32]) -> Result<Self> {
         let db = Database::create(path)?;
         // Creating every table up front means read transactions never fail
         // just because nothing has been written yet.
@@ -189,7 +195,32 @@ impl Store {
             tx.open_table(TRANSFER_CHUNKS)?;
         }
         tx.commit()?;
-        Ok(Self { db })
+        Ok(Self { db, key })
+    }
+
+    // ---- values at rest ----
+
+    /// Serialise a value and encrypt it for storage.
+    fn sealed<T: Serialize>(&self, purpose: &[u8], value: &T) -> Result<Vec<u8>> {
+        at_rest::seal(&self.key, purpose, &serde_json::to_vec(value)?)
+    }
+
+    /// Decrypt and parse a stored value.
+    ///
+    /// A row written by a version that stored plaintext still reads, because
+    /// refusing to open an existing account would be a worse answer than
+    /// reading it and writing it back sealed on the next change. Values are
+    /// only ever *written* encrypted, so a store converts itself as it is used.
+    fn opened<T: serde::de::DeserializeOwned>(&self, purpose: &[u8], raw: &[u8]) -> Result<T> {
+        match at_rest::open(&self.key, purpose, raw) {
+            Ok(plain) => Ok(serde_json::from_slice(&plain)?),
+            Err(_) => Ok(serde_json::from_slice(raw)?),
+        }
+    }
+
+    /// The same, for bytes that were never JSON.
+    fn opened_bytes(&self, purpose: &[u8], raw: &[u8]) -> Vec<u8> {
+        at_rest::open(&self.key, purpose, raw).unwrap_or_else(|_| raw.to_vec())
     }
 
     // ---- identity ----
@@ -213,7 +244,7 @@ impl Store {
         // Never persist a chain we have not verified — a corrupt chain on disk
         // is indistinguishable from one an attacker planted there.
         chain.validate()?;
-        let bytes = serde_json::to_vec(chain)?;
+        let bytes = self.sealed(purpose::CHAIN, chain)?;
         let tx = self.db.begin_write()?;
         {
             let mut t = tx.open_table(CHAINS)?;
@@ -229,13 +260,13 @@ impl Store {
         let Some(v) = t.get(account.to_display().as_str())? else {
             return Ok(None);
         };
-        Ok(Some(serde_json::from_slice(v.value())?))
+        Ok(Some(self.opened(purpose::CHAIN, v.value())?))
     }
 
     // ---- contacts ----
 
     pub fn put_contact(&self, contact: &Contact) -> Result<()> {
-        let bytes = serde_json::to_vec(contact)?;
+        let bytes = self.sealed(purpose::CONTACT, contact)?;
         let tx = self.db.begin_write()?;
         {
             let mut t = tx.open_table(CONTACTS)?;
@@ -251,7 +282,7 @@ impl Store {
         let Some(v) = t.get(account.to_display().as_str())? else {
             return Ok(None);
         };
-        Ok(Some(serde_json::from_slice(v.value())?))
+        Ok(Some(self.opened(purpose::CONTACT, v.value())?))
     }
 
     pub fn list_contacts(&self) -> Result<Vec<Contact>> {
@@ -260,7 +291,7 @@ impl Store {
         let mut out = Vec::new();
         for row in t.iter()? {
             let (_, v) = row?;
-            out.push(serde_json::from_slice(v.value())?);
+            out.push(self.opened(purpose::CONTACT, v.value())?);
         }
         Ok(out)
     }
@@ -325,7 +356,7 @@ impl Store {
             } else {
                 seen.insert(&msg.content.id[..], msg.received_at)?;
                 let mut t = tx.open_table(MESSAGES)?;
-                let bytes = serde_json::to_vec(msg)?;
+                let bytes = self.sealed(purpose::MESSAGE, msg)?;
                 t.insert(msg.seq, bytes.as_slice())?;
 
                 let mut index = tx.open_multimap_table(BY_CONVERSATION)?;
@@ -366,7 +397,7 @@ impl Store {
             // not happen — but a corrupt index must not take the whole thread
             // down with it.
             if let Some(v) = messages.get(seq)? {
-                out.push(serde_json::from_slice(v.value())?);
+                out.push(self.opened(purpose::MESSAGE, v.value())?);
             }
         }
         Ok(out)
@@ -466,7 +497,7 @@ impl Store {
         let mut out = Vec::new();
         for row in t.iter()? {
             let (_, v) = row?;
-            let state: Transfer = serde_json::from_slice(v.value())?;
+            let state: Transfer = self.opened(purpose::TRANSFER, v.value())?;
             if state.conversation == *other {
                 out.push(state.transfer);
             }
@@ -567,7 +598,7 @@ impl Store {
             if table.get(key.as_str())?.is_some() {
                 false
             } else {
-                table.insert(key.as_str(), serde_json::to_vec(t)?.as_slice())?;
+                table.insert(key.as_str(), self.sealed(purpose::TRANSFER, t)?.as_slice())?;
                 true
             }
         };
@@ -581,7 +612,7 @@ impl Store {
         let Some(v) = t.get(hex(transfer).as_str())? else {
             return Ok(None);
         };
-        Ok(Some(serde_json::from_slice(v.value())?))
+        Ok(Some(self.opened(purpose::TRANSFER, v.value())?))
     }
 
     /// File one chunk.
@@ -608,7 +639,7 @@ impl Store {
             let Some(raw) = manifests.get(key.as_str())? else {
                 return Ok(None);
             };
-            let mut state: Transfer = serde_json::from_slice(raw.value())?;
+            let mut state: Transfer = self.opened(purpose::TRANSFER, raw.value())?;
             drop(raw);
 
             let usable = if index >= state.chunks {
@@ -631,9 +662,15 @@ impl Store {
                 // Not counted twice, which is what would otherwise let one chunk
                 // sent repeatedly "complete" a transfer it never filled.
                 if chunks.get(chunk_key.as_str())?.is_none() {
-                    chunks.insert(chunk_key.as_str(), data)?;
+                    // Sealed like everything else: a half-received file is
+                    // still somebody's file.
+                    let sealed = at_rest::seal(&self.key, purpose::TRANSFER, data)?;
+                    chunks.insert(chunk_key.as_str(), sealed.as_slice())?;
                     state.have += 1;
-                    manifests.insert(key.as_str(), serde_json::to_vec(&state)?.as_slice())?;
+                    manifests.insert(
+                        key.as_str(),
+                        self.sealed(purpose::TRANSFER, &state)?.as_slice(),
+                    )?;
                 }
             }
             Some(state)
@@ -675,7 +712,7 @@ impl Store {
                     self.drop_transfer(transfer)?;
                     return Err(Error::Storage(format!("chunk {index} of {key} is missing")));
                 };
-                file.extend_from_slice(v.value());
+                file.extend_from_slice(&self.opened_bytes(purpose::TRANSFER, v.value()));
             }
         }
 
@@ -706,7 +743,7 @@ impl Store {
             let mut manifests = tx.open_table(TRANSFERS)?;
             manifests.insert(
                 hex(transfer).as_str(),
-                serde_json::to_vec(&state)?.as_slice(),
+                self.sealed(purpose::TRANSFER, &state)?.as_slice(),
             )?;
         }
         tx.commit()?;
@@ -754,7 +791,7 @@ impl Store {
             let t = tx.open_table(TRANSFERS)?;
             t.iter()?
                 .filter_map(|row| row.ok())
-                .filter_map(|(_, v)| serde_json::from_slice::<Transfer>(v.value()).ok())
+                .filter_map(|(_, v)| self.opened::<Transfer>(purpose::TRANSFER, v.value()).ok())
                 .filter(|t| t.started_at < cutoff)
                 .map(|t| t.transfer)
                 .collect()
@@ -768,7 +805,7 @@ impl Store {
     // ---- outbox ----
 
     pub fn queue(&self, item: &OutboxItem) -> Result<()> {
-        let bytes = serde_json::to_vec(item)?;
+        let bytes = self.sealed(purpose::OUTBOX, item)?;
         let tx = self.db.begin_write()?;
         {
             let mut t = tx.open_table(OUTBOX)?;
@@ -788,7 +825,7 @@ impl Store {
         let mut out = Vec::new();
         for row in t.iter()? {
             let (_, v) = row?;
-            out.push(serde_json::from_slice(v.value())?);
+            out.push(self.opened(purpose::OUTBOX, v.value())?);
         }
         Ok(out)
     }
@@ -857,9 +894,13 @@ mod tests {
 
     const NOW: u64 = 1_755_000_000;
 
+    /// The key every test store is encrypted with. Fixed, so a test can reopen
+    /// the same database and get its contents back.
+    const DEVICE_KEY: [u8; 32] = [3u8; 32];
+
     fn store() -> (Store, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("vega.redb")).unwrap();
+        let store = Store::open(dir.path().join("vega.redb"), DEVICE_KEY).unwrap();
         (store, dir)
     }
 
@@ -1007,6 +1048,144 @@ mod tests {
         assert_eq!(store.prune_transfers(NOW, 3600).unwrap(), 0, "still fresh");
         assert_eq!(store.prune_transfers(NOW + 7200, 3600).unwrap(), 1);
         assert!(store.get_transfer(&state.transfer).unwrap().is_none());
+    }
+
+    fn contact_named(name: &str) -> Contact {
+        let identity = Identity::create("x");
+        Contact {
+            account_id: identity.account_id,
+            display_name: name.into(),
+            contact_key: identity.contact_public(),
+            added_at: NOW,
+            verified: false,
+            chain_sent_len: 0,
+        }
+    }
+
+    /// The question "is my history encrypted" answered against the bytes on
+    /// disk, rather than against the intent of the code that wrote them.
+    #[test]
+    fn nothing_readable_is_left_in_the_database_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vega.redb");
+
+        let said = "meet me at the pier at four";
+        let called = "Distinctive Contact Name";
+        let filename = "bank-statement.png";
+        let file_bytes = b"SECRET-PIXELS-DO-NOT-LEAK";
+
+        {
+            let store = Store::open(&path, DEVICE_KEY).unwrap();
+            let contact = contact_named(called);
+            let who = contact.account_id;
+            store.put_contact(&contact).unwrap();
+
+            let mut content = Content::new(who, NOW, 0, Body::Text { text: said.into() });
+            content.id = [1u8; 32];
+            store
+                .append_message(&StoredMessage {
+                    seq: store.next_message_seq().unwrap(),
+                    conversation: who,
+                    from_account: who,
+                    from_device: DeviceId([1u8; 32]),
+                    outgoing: false,
+                    received_at: NOW,
+                    content,
+                })
+                .unwrap();
+
+            // A file mid-flight: its name is in the manifest and its bytes are
+            // in a chunk, and neither should be legible on disk either.
+            let mut transfer = transfer_of(file_bytes);
+            transfer.name = filename.into();
+            store.begin_transfer(&transfer).unwrap();
+            store
+                .put_chunk(&transfer.transfer, 0, file_bytes)
+                .unwrap()
+                .unwrap();
+
+            store
+                .queue(&OutboxItem {
+                    seq: store.next_outbox_seq().unwrap(),
+                    to_account: who,
+                    to_device: DeviceId([1u8; 32]),
+                    envelope: vec![1, 2, 3],
+                    queued_at: NOW,
+                    attempts: 0,
+                    message_id: [9u8; 32],
+                })
+                .unwrap();
+        }
+
+        let raw = std::fs::read(&path).unwrap();
+        let contains = |needle: &[u8]| raw.windows(needle.len()).any(|w| w == needle);
+
+        assert!(!contains(said.as_bytes()), "a message is legible on disk");
+        assert!(!contains(called.as_bytes()), "a contact name is legible");
+        assert!(!contains(filename.as_bytes()), "a file name is legible");
+        assert!(!contains(file_bytes), "a file's bytes are legible");
+
+        // And it all reads back through the store, which is the other half of
+        // the claim — encrypted is only useful if it is also recoverable.
+        let store = Store::open(&path, DEVICE_KEY).unwrap();
+        let contacts = store.list_contacts().unwrap();
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].display_name, called);
+        let thread = store.conversation(&contacts[0].account_id, 10).unwrap();
+        assert_eq!(thread[0].content.text(), Some(said));
+        assert_eq!(store.pending().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_wrong_device_key_does_not_read_the_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vega.redb");
+        let who;
+        {
+            let store = Store::open(&path, DEVICE_KEY).unwrap();
+            let contact = contact_named("Ada");
+            who = contact.account_id;
+            store.put_contact(&contact).unwrap();
+        }
+
+        let stranger = Store::open(&path, [0xff; 32]).unwrap();
+        assert!(
+            stranger.get_contact(&who).is_err(),
+            "another key must not read stored contacts"
+        );
+    }
+
+    /// An account created before any of this existed still opens.
+    #[test]
+    fn a_row_written_as_plaintext_is_still_readable() {
+        let (store, _dir) = store();
+        let contact = contact_named("written by an older version");
+        let who = contact.account_id;
+
+        // Exactly what the previous version wrote: plain JSON, no nonce.
+        let tx = store.db.begin_write().unwrap();
+        {
+            let mut t = tx.open_table(CONTACTS).unwrap();
+            t.insert(
+                who.to_display().as_str(),
+                serde_json::to_vec(&contact).unwrap().as_slice(),
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+
+        let read = store.get_contact(&who).unwrap().unwrap();
+        assert_eq!(read.display_name, "written by an older version");
+
+        // Writing it back seals it, so a store converts itself as it is used.
+        store.put_contact(&read).unwrap();
+        let tx = store.db.begin_read().unwrap();
+        let t = tx.open_table(CONTACTS).unwrap();
+        let stored = t.get(who.to_display().as_str()).unwrap().unwrap();
+        assert!(
+            !stored.value().windows(5).any(|w| w == b"writt"),
+            "a rewritten row must not still be plaintext"
+        );
     }
 
     #[test]

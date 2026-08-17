@@ -127,6 +127,13 @@ around it has not.
 - **Device linking is not implemented.** An account is one device. The crypto
   exists and the sigchain accepts device-signed additions; the pairing flow does
   not, and a rushed one would be worse than none.
+- **What is encrypted at rest is the content, not the metadata.** Message
+  bodies, contacts, chains, queued envelopes and received files are stored
+  sealed under the device key. The database keys are not: which account ids you
+  hold, how many messages are in each conversation, and when they arrived are
+  all readable by anyone who can read the directory. And with no platform
+  keyring the device key is a 0600 file beside the database, so on those systems
+  the encryption is worth exactly what those permissions are.
 - **Where there is no keyring, the key is a 0600 file.** Headless systems,
   containers, and Android take the fallback path. It protects against another
   user on the machine and a stolen backup, and nothing else. The app logs which

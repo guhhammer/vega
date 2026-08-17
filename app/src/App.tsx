@@ -474,27 +474,25 @@ function Thread({
     const items: MenuItem[] = [];
     if (m.file) {
       const file = m.file;
-      if (file.image && file.path) {
+      if (file.image && file.ready) {
         items.push({
           label: "Open image",
           run: () => {
-            void api
-              .readImage(file.transfer, file.name)
-              .then(onOpenImage)
-              .catch(() => {});
+            void api.readImage(file.transfer).then(onOpenImage).catch(() => {});
           },
         });
       }
-      if (m.file.path) {
-        const path = m.file.path;
+      if (file.ready) {
         items.push({
-          label: "Copy path",
-          run: () => void navigator.clipboard.writeText(path),
+          label: "Save a copy",
+          run: () => {
+            void api.exportFile(file.transfer, file.name).catch(() => {});
+          },
         });
       }
       items.push({
         label: "Copy file name",
-        run: () => void navigator.clipboard.writeText(m.file?.name ?? ""),
+        run: () => void navigator.clipboard.writeText(file.name),
       });
     } else {
       items.push({
@@ -546,15 +544,15 @@ function FileBubble({
   file: NonNullable<Message["file"]>;
   onOpen: (src: string) => void;
 }) {
-  const [copied, setCopied] = useState(false);
+  const [saved, setSaved] = useState<string | null>(null);
   const [src, setSrc] = useState<string | null>(null);
   const [fault, setFault] = useState(false);
-  const done = file.path !== null;
+  const done = file.ready;
   const isImage = done && file.image !== null;
 
   const load = useCallback(async () => {
     try {
-      const url = await api.readImage(file.transfer, file.name);
+      const url = await api.readImage(file.transfer);
       setSrc(url);
       return url;
     } catch {
@@ -563,7 +561,7 @@ function FileBubble({
       setFault(true);
       return null;
     }
-  }, [file.transfer, file.name]);
+  }, [file.transfer]);
 
   useEffect(() => {
     if (isImage && !src && !fault && file.size <= PREVIEW_LIMIT) void load();
@@ -600,19 +598,22 @@ function FileBubble({
           : `${formatSize(file.size)} · piece ${file.have} of ${file.chunks}`}
       </div>
       {done ? (
-        // No opener for anything else: granting the app a shell or filesystem
-        // plugin to launch whatever a contact sent would be a strange thing for
-        // this program to do. An image is different — it is displayed here,
-        // inside the app, and nothing is handed to the system.
+        // What Vega stores is encrypted, so there is no path worth handing over
+        // — saving a copy is what makes it a file anything else can open, and
+        // that copy has only whatever protection the disk gives it.
         <button
           className="file-path"
-          title={file.path ?? ""}
+          title={saved ?? "Write a decrypted copy to your downloads folder"}
           onClick={async () => {
-            await navigator.clipboard.writeText(file.path ?? "");
-            setCopied(true);
+            try {
+              setSaved(await api.exportFile(file.transfer, file.name));
+            } catch (e) {
+              setFault(true);
+              setSaved(String(e));
+            }
           }}
         >
-          {copied ? "Path copied" : "Copy path"}
+          {saved ? `Saved to ${saved}` : "Save a copy"}
         </button>
       ) : (
         <progress value={file.have} max={file.chunks} />

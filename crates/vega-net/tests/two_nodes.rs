@@ -257,6 +257,103 @@ async fn a_full_chunk_envelope_fits_on_the_wire() {
     );
 }
 
+/// A file gets exactly the protection a sentence does, and this is the test
+/// that says so.
+///
+/// Files are chunked into ordinary `Content` messages, so in principle they ride
+/// the same ratchet and the same seal. In principle is not good enough for the
+/// question "is what I send encrypted": the bytes are checked here against the
+/// actual wire form, and a peer who knows both parties is asked to open one.
+#[tokio::test]
+async fn a_file_is_opaque_on_the_wire() {
+    let (mut alice, alice_chain) = bootstrap_account("alice").unwrap();
+    let (bob, bob_chain) = bootstrap_account("bob").unwrap();
+    let (mut eve, _) = bootstrap_account("eve").unwrap();
+    let mut alice_sessions = Sessions::new();
+    let mut eve_sessions = Sessions::new();
+
+    let bob_state = bob_chain.validate().unwrap();
+    let pairwise = alice.pairwise_with(&bob_state.contact, &bob.account_id);
+    let now = vega_core::now();
+
+    // Distinctive enough that finding it in the ciphertext could not be luck,
+    // and shaped like a real file: a PNG header, then a recognisable payload.
+    let secret = b"\x89PNG\r\n\x1a\n SECRET-PIXELS-DO-NOT-LEAK";
+    let manifest = vega_core::FileManifest {
+        transfer: [0x11; 32],
+        name: "bank-statement.png".into(),
+        size: secret.len() as u64,
+        // Not checked here: nothing reassembles this, and what is under test is
+        // what a peer carrying the envelope can see.
+        hash: [0x22; 32],
+        chunks: 1,
+    };
+
+    let to_bob = Recipient {
+        account: bob.account_id,
+        state: &bob_state,
+        pairwise: &pairwise,
+    };
+
+    let mut wire = Vec::new();
+    for body in [
+        Body::File {
+            file: manifest.clone(),
+        },
+        Body::FileChunk {
+            file: manifest.clone(),
+            index: 0,
+            data: secret.to_vec(),
+        },
+    ] {
+        let content = Content::new(bob.account_id, now, 1, body);
+        let envelopes = fan_out(
+            &mut alice,
+            &mut alice_sessions,
+            &to_bob,
+            None,
+            &content,
+            now,
+        )
+        .unwrap();
+        wire.push(envelopes[0].1.clone());
+    }
+
+    for envelope in &wire {
+        let bytes = envelope.to_bytes().unwrap();
+        let raw = String::from_utf8_lossy(&bytes);
+
+        // The file itself.
+        assert!(
+            !bytes.windows(secret.len()).any(|w| w == secret),
+            "the file's bytes appear in the envelope"
+        );
+        // What it is called. A relay learning "bank-statement.png" would be a
+        // leak even with the contents sealed.
+        assert!(
+            !raw.contains("bank-statement"),
+            "the file name appears in the envelope"
+        );
+        // And who sent it.
+        assert!(
+            !raw.contains(&alice.account_id.to_display()),
+            "the sender's account id appears in the envelope"
+        );
+
+        // Eve knows both parties' chains and still cannot open it.
+        let eve_knows = Known(vec![
+            alice_chain.validate().unwrap(),
+            bob_chain.validate().unwrap(),
+        ]);
+        assert!(
+            eve_sessions
+                .decrypt(&mut eve, envelope, &eve_knows)
+                .is_err(),
+            "a non-recipient opened a file envelope"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_stranger_on_the_same_network_learns_nothing() {
     let (mut alice, alice_chain) = bootstrap_account("alice").unwrap();

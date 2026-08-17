@@ -20,8 +20,11 @@ export interface Contact {
 export interface FileInfo {
   name: string;
   size: number;
-  /** Where it is on disk, once all of it is. Null while it is still arriving. */
-  path: string | null;
+  /**
+   * Whether the whole file has arrived. There is no path to show: what Vega
+   * keeps on disk is encrypted, and `exportFile` is how a usable copy is made.
+   */
+  ready: boolean;
   /**
    * The image type, when the bytes on disk are one Vega will render — decided
    * by Rust from the file's first bytes, never from its name. Null means show
@@ -87,13 +90,21 @@ export const api = {
    * access at all, and asking for it would be a much larger grant than showing
    * one picture is worth.
    */
-  readImage: async (transfer: string, name: string) => {
+  readImage: async (transfer: string) => {
     const img = await invoke<{ mime: string; data: string }>("read_image", {
       transfer,
-      name,
     });
     return `data:${img.mime};base64,${img.data}`;
   },
+
+  /**
+   * Write a decrypted copy into the downloads folder and return where it went.
+   *
+   * From that moment the copy is an ordinary file with ordinary protection —
+   * which is the whole reason it is a deliberate action rather than the default.
+   */
+  exportFile: (transfer: string, name: string) =>
+    invoke<string>("export_file", { transfer, name }),
 
   /** Local only. The account id identifies them on the wire, and it never changes. */
   renameContact: (account: string, name: string) =>

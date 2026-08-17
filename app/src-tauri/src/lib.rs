@@ -27,20 +27,31 @@ struct Ctx {
     /// Where completed file transfers are written. Kept here rather than derived
     /// on demand so that exactly one place decides where files go.
     files: Arc<std::path::PathBuf>,
+    /// The device key, for the files beside the database. The database holds its
+    /// own copy; this is the same key.
+    key: [u8; 32],
 }
 
 /// Where a transfer's bytes live once they are whole.
 ///
-/// One directory per transfer id: two people sending `photo.jpg` must not
-/// overwrite each other, and a transfer id is the only name in the protocol
-/// guaranteed to be unique. The file inside keeps the name it was sent under,
-/// which is what makes the path worth showing to somebody.
-fn file_path(root: &std::path::Path, transfer: &[u8; 32], name: &str) -> std::path::PathBuf {
+/// One directory per transfer id, and the file inside is always called `blob`.
+/// The name the sender chose is kept in the message instead, which is encrypted
+/// — so a directory listing of received files says how many there are and
+/// nothing about what they are. It also means no part of this path comes from a
+/// peer, and there is no longer anything here to sanitise.
+fn transfer_dir(root: &std::path::Path, transfer: &[u8; 32]) -> std::path::PathBuf {
     root.join(data_encoding::HEXLOWER.encode(transfer))
-        // Sanitised on arrival already. Done again here because this is the call
-        // that turns a name into a filesystem write, and a check at the point of
-        // use survives a caller being added later that forgot the first one.
-        .join(vega_core::safe_file_name(name))
+}
+
+/// The file itself, encrypted with the device key.
+fn blob_path(root: &std::path::Path, transfer: &[u8; 32]) -> std::path::PathBuf {
+    transfer_dir(root, transfer).join("blob")
+}
+
+/// What kind of image the blob holds, written beside it so that listing a
+/// conversation does not have to decrypt every file to find out.
+fn kind_path(root: &std::path::Path, transfer: &[u8; 32]) -> std::path::PathBuf {
+    transfer_dir(root, transfer).join("kind")
 }
 
 /// Delete everything a finished transfer left on disk.
@@ -49,7 +60,7 @@ fn file_path(root: &std::path::Path, transfer: &[u8; 32], name: &str) -> std::pa
 /// gone, and telling someone their chat could not be cleared because of a
 /// leftover directory would be both alarming and useless.
 fn remove_transfer_dir(root: &std::path::Path, transfer: &[u8; 32]) {
-    let dir = root.join(data_encoding::HEXLOWER.encode(transfer));
+    let dir = transfer_dir(root, transfer);
     if let Err(e) = std::fs::remove_dir_all(&dir) {
         if e.kind() != std::io::ErrorKind::NotFound {
             tracing::warn!(error = %e, path = %dir.display(), "could not delete a file");
@@ -85,16 +96,16 @@ fn image_mime(head: &[u8]) -> Option<&'static str> {
     None
 }
 
-/// Peek at a file on disk and say whether it is an image worth showing.
+/// What a stored transfer is, according to the note left beside it.
 ///
-/// Only the header is read, so listing a conversation full of files costs a
-/// handful of bytes each rather than the files themselves.
-fn sniff_image(path: &std::path::Path) -> Option<&'static str> {
-    use std::io::Read;
-    let mut head = [0u8; 16];
-    let mut file = std::fs::File::open(path).ok()?;
-    let read = file.read(&mut head).ok()?;
-    image_mime(&head[..read])
+/// The blob is one sealed unit, so there is no reading its first bytes without
+/// decrypting all of it — which listing a conversation must not do for every
+/// file in it. The answer is recorded at the moment the file is written, when
+/// the plaintext is in hand anyway.
+fn stored_kind(root: &std::path::Path, key: &[u8; 32], transfer: &[u8; 32]) -> Option<String> {
+    let sealed = std::fs::read(kind_path(root, transfer)).ok()?;
+    let plain = vega_core::at_rest::open(key, vega_core::at_rest::purpose::FILE, &sealed).ok()?;
+    String::from_utf8(plain).ok()
 }
 
 /// What this device calls itself: the local override if one was set, otherwise
@@ -107,18 +118,45 @@ fn device_label(rt: &Runtime) -> String {
         .unwrap_or_else(|| rt.identity.label.clone())
 }
 
+/// Store a completed file, encrypted with the device key.
+///
+/// Nothing readable reaches the disk: not the contents, and not the name. What
+/// is written beside it is the image type, if it is one, so that showing a
+/// conversation does not mean decrypting every file in it.
 fn write_file(
     root: &std::path::Path,
+    key: &[u8; 32],
     transfer: &[u8; 32],
-    name: &str,
     bytes: &[u8],
-) -> std::io::Result<std::path::PathBuf> {
-    let path = file_path(root, transfer, name);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+) -> std::io::Result<()> {
+    use vega_core::at_rest::{purpose, seal};
+    let io = |e: vega_core::Error| std::io::Error::other(e.to_string());
+
+    std::fs::create_dir_all(transfer_dir(root, transfer))?;
+    std::fs::write(
+        blob_path(root, transfer),
+        seal(key, purpose::FILE, bytes).map_err(io)?,
+    )?;
+
+    if let Some(mime) = image_mime(bytes) {
+        std::fs::write(
+            kind_path(root, transfer),
+            seal(key, purpose::FILE, mime.as_bytes()).map_err(io)?,
+        )?;
     }
-    std::fs::write(&path, bytes)?;
-    Ok(path)
+    Ok(())
+}
+
+/// Read a stored file back, decrypted.
+fn read_file(
+    root: &std::path::Path,
+    key: &[u8; 32],
+    transfer: &[u8; 32],
+) -> Result<Vec<u8>, String> {
+    let sealed = std::fs::read(blob_path(root, transfer))
+        .map_err(|e| format!("that file is not readable: {e}"))?;
+    vega_core::at_rest::open(key, vega_core::at_rest::purpose::FILE, &sealed)
+        .map_err(|_| "that file does not open with this device's key".to_string())
 }
 
 // ---------------------------------------------------------------- views
@@ -155,11 +193,12 @@ pub struct MessageView {
 pub struct FileView {
     name: String,
     size: u64,
-    /// Where it is on disk, once all of it is. `None` while it is still coming.
-    path: Option<String>,
-    /// The image type, if the bytes on disk are one Vega will render. `None`
-    /// for everything else, which the interface shows as a plain file.
-    image: Option<&'static str>,
+    /// Whether the whole file is here. There is no path to offer: what is on
+    /// disk is ciphertext, and `export_file` is how a usable copy is made.
+    ready: bool,
+    /// The image type, if the stored file is one Vega will render. `None` for
+    /// everything else, which the interface shows as a plain file.
+    image: Option<String>,
     /// Chunks held out of chunks expected — the progress bar, and the reason
     /// this view is computed per read rather than stored with the message.
     have: u32,
@@ -277,9 +316,9 @@ async fn send_file(
         rt.send_file(&account, &name, &bytes).map_err(fail)?
     };
 
-    // The sender's own copy, under the same name and path the recipient will
-    // use, so a file looks the same in both threads.
-    if let Err(e) = write_file(&ctx.files, &transfer, &name, &bytes) {
+    // The sender's own copy, stored exactly as the recipient will store theirs,
+    // so a file looks the same in both threads.
+    if let Err(e) = write_file(&ctx.files, &ctx.key, &transfer, &bytes) {
         // Queued and on its way regardless; only our local copy is missing.
         tracing::warn!(error = %e, "could not keep a local copy of a sent file");
     }
@@ -386,26 +425,78 @@ async fn clear_all_history(ctx: State<'_, Ctx>) -> Result<usize, String> {
 /// The sniff is repeated here rather than trusted from the listing: this is the
 /// call that decides what a browser engine is asked to decode.
 #[tauri::command]
-async fn read_image(
-    transfer: String,
-    name: String,
-    ctx: State<'_, Ctx>,
-) -> Result<ImageData, String> {
-    let raw = data_encoding::HEXLOWER
-        .decode(transfer.as_bytes())
-        .map_err(|_| "not a transfer id".to_string())?;
-    let id: [u8; 32] = raw
-        .try_into()
-        .map_err(|_| "not a transfer id".to_string())?;
-
-    let path = file_path(&ctx.files, &id, &name);
-    let bytes = std::fs::read(&path).map_err(|e| format!("that file is not readable: {e}"))?;
+async fn read_image(transfer: String, ctx: State<'_, Ctx>) -> Result<ImageData, String> {
+    let id = transfer_id(&transfer)?;
+    let bytes = read_file(&ctx.files, &ctx.key, &id)?;
 
     let mime = image_mime(&bytes).ok_or("that file is not an image Vega can show")?;
     Ok(ImageData {
         mime,
         data: data_encoding::BASE64.encode(&bytes),
     })
+}
+
+/// Write a usable copy of a received file into the downloads folder.
+///
+/// What Vega keeps is encrypted, which is the point — and also means it is not a
+/// file anything else can open. This is the way out: one decrypted copy, put
+/// where downloads go, under the name it was sent with. From that moment it is
+/// an ordinary file with ordinary protection, and the interface says so.
+#[tauri::command]
+async fn export_file(
+    transfer: String,
+    name: String,
+    app: AppHandle,
+    ctx: State<'_, Ctx>,
+) -> Result<String, String> {
+    let id = transfer_id(&transfer)?;
+    let bytes = read_file(&ctx.files, &ctx.key, &id)?;
+
+    // The downloads folder if the platform has one; the data directory is a
+    // poor second choice but better than refusing to hand the file over.
+    let dir = app
+        .path()
+        .download_dir()
+        .unwrap_or_else(|_| ctx.files.as_path().to_path_buf());
+    std::fs::create_dir_all(&dir).map_err(fail)?;
+
+    // The name is a peer's, so it is reduced to one harmless component before it
+    // is joined to a directory this program did not choose.
+    let safe = vega_core::safe_file_name(&name);
+    let mut path = dir.join(&safe);
+
+    // Never overwrite what is already there. This writes outside Vega's own
+    // directory, where things it did not put there live.
+    if path.exists() {
+        let as_path = std::path::Path::new(&safe);
+        let stem = as_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".into());
+        let ext = as_path
+            .extension()
+            .map(|e| format!(".{}", e.to_string_lossy()))
+            .unwrap_or_default();
+        for n in 2..1000 {
+            let candidate = dir.join(format!("{stem} ({n}){ext}"));
+            if !candidate.exists() {
+                path = candidate;
+                break;
+            }
+        }
+    }
+
+    std::fs::write(&path, &bytes).map_err(fail)?;
+    Ok(path.display().to_string())
+}
+
+/// A transfer id from the hex the interface was given.
+fn transfer_id(hex: &str) -> Result<[u8; 32], String> {
+    data_encoding::HEXLOWER
+        .decode(hex.as_bytes())
+        .ok()
+        .and_then(|raw| <[u8; 32]>::try_from(raw).ok())
+        .ok_or_else(|| "not a transfer id".to_string())
 }
 
 /// What each conversation holds, for the screen that offers to clear them.
@@ -453,15 +544,14 @@ async fn conversation(with: String, ctx: State<'_, Ctx>) -> Result<Vec<MessageVi
             };
 
             if let Some(info) = m.content.file() {
-                let path = file_path(&ctx.files, &info.transfer, &info.name);
                 // Progress is read here rather than stored on the message,
                 // because it changes without the message changing. A transfer
                 // marked done, or pruned away entirely, is finished — and in
-                // both cases the file on disk is what actually settles it.
-                let (have, on_disk) = match rt.store.get_transfer(&info.transfer) {
+                // both cases the blob on disk is what actually settles it.
+                let (have, ready) = match rt.store.get_transfer(&info.transfer) {
                     Ok(Some(open)) if !open.done => (open.have, false),
                     _ => {
-                        let there = path.is_file();
+                        let there = blob_path(&ctx.files, &info.transfer).is_file();
                         (if there { info.chunks } else { 0 }, there)
                     }
                 };
@@ -470,10 +560,12 @@ async fn conversation(with: String, ctx: State<'_, Ctx>) -> Result<Vec<MessageVi
                     Some(FileView {
                         name: info.name.to_string(),
                         size: info.size,
-                        // Decided from the bytes, not the name, and only once
-                        // the whole file is here — half a JPEG is not a picture.
-                        image: on_disk.then(|| sniff_image(&path)).flatten(),
-                        path: on_disk.then(|| path.display().to_string()),
+                        // Recorded when the file was written, from its bytes
+                        // rather than its name.
+                        image: ready
+                            .then(|| stored_kind(&ctx.files, &ctx.key, &info.transfer))
+                            .flatten(),
+                        ready,
                         have,
                         chunks: info.chunks,
                         transfer: data_encoding::HEXLOWER.encode(&info.transfer),
@@ -520,7 +612,7 @@ async fn build_ctx(data_dir: std::path::PathBuf) -> Result<Ctx, String> {
         );
     }
     let pickle_key = key.bytes;
-    let store = Store::open(data_dir.join("vega.redb")).map_err(fail)?;
+    let store = Store::open(data_dir.join("vega.redb"), pickle_key).map_err(fail)?;
 
     // An existing identity is loaded; a first run creates one. Never both.
     let (identity, chain) = match store.load_identity(&pickle_key).map_err(fail)? {
@@ -589,6 +681,7 @@ async fn build_ctx(data_dir: std::path::PathBuf) -> Result<Ctx, String> {
         shared: Arc::new(Mutex::new(runtime)),
         net,
         files: Arc::new(files),
+        key: pickle_key,
     })
 }
 
@@ -742,8 +835,8 @@ async fn pump(app: AppHandle, ctx: Ctx, mut events: tokio::sync::mpsc::Receiver<
         // Written with the lock released: a ten-megabyte write must not hold up
         // decryption of everything behind it.
         if let Some((transfer, name, bytes)) = arrived {
-            match write_file(&ctx.files, &transfer, &name, &bytes) {
-                Ok(path) => tracing::info!(path = %path.display(), "saved a file"),
+            match write_file(&ctx.files, &ctx.key, &transfer, &bytes) {
+                Ok(()) => tracing::info!(%name, "saved a file"),
                 // The transfer is gone from the store either way, so this file
                 // is lost rather than resumable. Saying so is all that is left.
                 Err(e) => tracing::error!(error = %e, %name, "could not save a received file"),
@@ -939,6 +1032,7 @@ pub fn run() {
             send_message,
             send_file,
             read_image,
+            export_file,
             rename_contact,
             rename_device,
             clear_chat,
@@ -953,27 +1047,50 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{image_mime, sniff_image};
+    use super::{blob_path, image_mime, read_file, stored_kind, write_file};
+
+    const KEY: [u8; 32] = [4u8; 32];
+
+    /// A received file must not be legible to anyone reading the disk, and must
+    /// still be legible to Vega.
+    #[test]
+    fn a_stored_file_is_encrypted_and_still_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let transfer = [0xaa; 32];
+        let png = b"\x89PNG\r\n\x1a\nSECRET-PIXELS-DO-NOT-LEAK";
+
+        write_file(dir.path(), &KEY, &transfer, png).unwrap();
+
+        let on_disk = std::fs::read(blob_path(dir.path(), &transfer)).unwrap();
+        assert!(
+            !on_disk.windows(png.len()).any(|w| w == png),
+            "the file is sitting on disk in the clear"
+        );
+        assert_eq!(read_file(dir.path(), &KEY, &transfer).unwrap(), png);
+
+        // The kind is recorded so a listing need not decrypt, and it is sealed
+        // like everything else.
+        assert_eq!(
+            stored_kind(dir.path(), &KEY, &transfer).as_deref(),
+            Some("image/png")
+        );
+        let kind_raw = std::fs::read(super::kind_path(dir.path(), &transfer)).unwrap();
+        assert!(!kind_raw.starts_with(b"image/"));
+
+        // Another key opens neither.
+        assert!(read_file(dir.path(), &[9u8; 32], &transfer).is_err());
+        assert_eq!(stored_kind(dir.path(), &[9u8; 32], &transfer), None);
+    }
 
     #[test]
-    fn sniffing_reads_the_file_rather_than_the_name() {
+    fn only_images_get_a_kind_recorded() {
         let dir = tempfile::tempdir().unwrap();
-
-        // Named as a document, but the bytes are a PNG: shown as a picture.
-        let lying = dir.path().join("invoice.pdf");
-        std::fs::write(&lying, [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).unwrap();
-        assert_eq!(sniff_image(&lying), Some("image/png"));
-
-        // Named as a picture, but the bytes are a script: shown as a file.
-        let hostile = dir.path().join("photo.png");
-        std::fs::write(&hostile, b"#!/bin/sh\nrm -rf /").unwrap();
-        assert_eq!(sniff_image(&hostile), None);
-
-        // Shorter than any header, and a file that is not there at all.
-        let stub = dir.path().join("tiny");
-        std::fs::write(&stub, b"\x89P").unwrap();
-        assert_eq!(sniff_image(&stub), None);
-        assert_eq!(sniff_image(&dir.path().join("absent")), None);
+        let transfer = [0xbb; 32];
+        // Named like a picture elsewhere in the system, but these are the bytes
+        // that decide, and they are a script.
+        write_file(dir.path(), &KEY, &transfer, b"#!/bin/sh\nrm -rf /").unwrap();
+        assert_eq!(stored_kind(dir.path(), &KEY, &transfer), None);
+        assert!(read_file(dir.path(), &KEY, &transfer).is_ok());
     }
 
     #[test]

@@ -120,14 +120,29 @@ later addition at a real latency cost. Until then, do not use this where being
 **Cannot:** decrypt history from before a compromised session was established —
 the ratchet deletes as it advances.
 
-**What stops them:** forward secrecy from the double ratchet. The database is
-encrypted with a key from `keystore`.
+**What stops them:** forward secrecy from the double ratchet, and encryption at
+rest for everything with content in it.
 
-**Residual, and it is the sharpest one:** the key is a 0600 file next to the
-database, not the platform keystore. That defends against another user on the
-machine and a stolen backup. Against someone with your unlocked user session, or
-a disk image plus that file, it does nothing. Written down in
-[`../README.md`](../README.md) rather than glossed.
+Message bodies, contacts, sigchains, queued envelopes, partial transfers and
+received files are stored sealed with XChaCha20-Poly1305 under a subkey derived
+from the device key — see [`at_rest`](../crates/vega-core/src/at_rest.rs). The
+account identity and the Olm sessions were already encrypted pickles. A received
+file is a sealed blob in a directory named after its transfer id, so neither its
+contents nor its name reaches the disk in the clear.
+
+**What they still learn.** Encryption covers values, not keys, and the keys are
+metadata: which account ids you hold, how many messages each conversation has,
+when each message arrived, and how many files. Hiding that means encrypting the
+index too, which needs a different design than lookups by account id. The local
+device nickname is also stored in the clear.
+
+**Residual, and it is the sharpest one:** where the key lives. With no platform
+keyring — headless systems, containers, Android — it falls back to a 0600 file
+beside the database, and the encryption above is then only as good as the file
+permissions protecting that key. Against someone with your unlocked session it
+does nothing: Vega is running, so the key is in memory and the history opens.
+What it does defend is a stolen disk, a backup, or another user on the machine.
+Written down in [`../README.md`](../README.md) rather than glossed.
 
 ### G. Someone who substitutes an invite in transit
 

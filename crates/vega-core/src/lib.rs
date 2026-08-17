@@ -13,6 +13,7 @@
 //!
 //! Nothing here panics on untrusted input, and nothing here talks to a server.
 
+pub mod at_rest;
 pub mod codec;
 pub mod envelope;
 pub mod error;

@@ -24,6 +24,19 @@ each other.
   filesystem plugin, and no permission to read a path it was not handed. A
   received file shows its name, size, arrival progress, and a button that copies
   its path — Vega does not offer to open what a contact sent it.
+- **Encryption at rest.** Message bodies, contacts, sigchains, queued envelopes,
+  partial transfers and received files are now stored sealed with
+  XChaCha20-Poly1305 under a subkey of the device key, one subkey per kind so a
+  stored value cannot be moved between tables. A received file is a sealed blob
+  in a directory named after its transfer id, so its name never reaches the disk
+  either — which also removes the last path component that came from a peer.
+  Databases written by 1.0.0 still open, and re-seal themselves as they are
+  written to. What remains readable is metadata: which accounts you hold, how
+  many messages each conversation has, and when they arrived.
+- **Files are exported rather than opened in place.** What Vega stores is
+  ciphertext, so "Save a copy" writes one decrypted copy to the downloads folder
+  and tells you where it went. Images still display in the app without ever
+  becoming a file on disk.
 - **Images appear in the conversation**, and open full size inside the app when
   clicked. What counts as an image is decided from the file's first bytes, never
   from its name, and SVG is deliberately not on the list — it is a scriptable
