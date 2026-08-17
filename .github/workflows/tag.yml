@@ -49,7 +49,7 @@ jobs:
       tag: ${{ steps.check.outputs.tag }}
       tagged: ${{ steps.check.outputs.tagged }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Every tag, not just the tip: deciding whether this version has been
           # released before is the entire point of the job, and a shallow clone

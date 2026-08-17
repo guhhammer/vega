@@ -18,7 +18,7 @@ jobs:
     name: android cross-compile
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android, armv7-linux-androideabi
@@ -46,7 +46,7 @@ jobs:
     name: rustdoc
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # `--no-deps` documents only this workspace, but the dependencies are
       # still compiled and vega-app's build scripts still run pkg-config against
       # the system webview. Without these, the job fails long before rustdoc.
@@ -69,7 +69,7 @@ jobs:
     name: release build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: System dependencies
         run: |
           sudo apt-get update
@@ -88,7 +88,7 @@ jobs:
     name: unused dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # udeps compiles the whole workspace to see what is actually linked, so
       # vega-app needs the system webview here exactly as it does elsewhere.
       - name: System dependencies
