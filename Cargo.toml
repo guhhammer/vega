@@ -3,7 +3,7 @@ members = ["crates/vega-core", "crates/vega-net", "crates/vega-android", "app/sr
 resolver = "2"
 
 [workspace.package]
-version = "1.0.0"
+version = "1.9.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["The Vega contributors"]
