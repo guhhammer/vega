@@ -241,13 +241,33 @@ export default function App() {
 
   const current = contacts.find((c) => c.account_id === active) ?? null;
 
+  /** Unread in every conversation other than the one being looked at. */
+  const elsewhere = contacts.reduce(
+    (n, c) => (c.account_id === active ? n : n + c.unread),
+    0,
+  );
+
   const refreshContacts = useCallback(async () => {
     setContacts(await api.listContacts());
   }, []);
 
-  const refreshThread = useCallback(async (id: string | null) => {
-    setThread(id ? await api.conversation(id) : []);
-  }, []);
+  /**
+   * Load a conversation, and treat having loaded it as having read it.
+   *
+   * The marking happens here rather than inside the Rust query, because "this
+   * is on screen" is a fact about the interface and nothing on the other side
+   * of the boundary can know it. The contact list is re-read afterwards, or the
+   * badge that just went to zero would sit there until something else happened.
+   */
+  const refreshThread = useCallback(
+    async (id: string | null) => {
+      setThread(id ? await api.conversation(id) : []);
+      if (!id) return;
+      await api.markRead(id);
+      await refreshContacts();
+    },
+    [refreshContacts],
+  );
 
   /// Everything on screen, re-read from the Rust side. What the reload button
   /// does, and the honest answer to "is this stale?" — the app is event-driven,
@@ -283,12 +303,13 @@ export default function App() {
     void refreshThread(active);
   }, [active, refreshThread]);
 
-  // A message can land in any conversation, so refresh the list either way and
-  // the thread only when it is the one on screen.
+  // A message can land in any conversation. One that is on screen is read as it
+  // arrives, and `refreshThread` re-reads the list itself once it has said so;
+  // one that is not only moves a badge.
   useEffect(() => {
     const unlisten = onMessage((conversation) => {
-      void refreshContacts();
       if (conversation === active) void refreshThread(active);
+      else void refreshContacts();
     });
     return () => {
       void unlisten.then((f) => f());
@@ -530,6 +551,7 @@ export default function App() {
             <button
               key={c.account_id}
               className="contact"
+              data-unread={c.unread > 0}
               aria-current={c.account_id === active}
               onClick={() => setActive(c.account_id)}
               onContextMenu={(e) => {
@@ -593,6 +615,16 @@ export default function App() {
                 </span>
                 <span className="sub">{c.short_id}</span>
               </span>
+              {/* Capped at 99+: past that the number has stopped being
+                  information and the row still has to fit. */}
+              {c.unread > 0 && (
+                <span
+                  className="unread"
+                  aria-label={`${c.unread} unread message${c.unread === 1 ? "" : "s"}`}
+                >
+                  {c.unread > 99 ? "99+" : c.unread}
+                </span>
+              )}
             </button>
           ))}
 
@@ -668,12 +700,24 @@ export default function App() {
         {current ? (
           <>
             <header>
+              {/* Only ever visible on one column, where the list is off
+                  screen — so the count of what is waiting in the conversations
+                  you cannot see rides back with it. */}
               <button
                 className="icon back"
-                aria-label="Back to conversations"
+                aria-label={
+                  elsewhere > 0
+                    ? `Back to conversations, ${elsewhere} unread`
+                    : "Back to conversations"
+                }
                 onClick={() => setActive(null)}
               >
                 ←
+                {elsewhere > 0 && (
+                  <span className="unread" aria-hidden="true">
+                    {elsewhere > 99 ? "99+" : elsewhere}
+                  </span>
+                )}
               </button>
               <Avatar id={current.account_id} name={current.display_name} />
               <div className="chat-who">

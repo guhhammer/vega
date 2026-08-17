@@ -202,6 +202,9 @@ impl Runtime {
             added_at: vega_core::now(),
             verified: false,
             chain_sent_len: 0,
+            // Nothing has arrived from somebody who was added a moment ago, and
+            // a conversation that opened already badged would be a lie.
+            read_seq: 0,
         })?;
         Ok(invite.account_id)
     }

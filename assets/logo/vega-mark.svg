@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="title desc">
+  <title id="title">Vega</title>
+  <desc id="desc">A four-pointed star, drawn as the space four adjoining circles leave between them.</desc>
+
+  <!--
+    The mark is not a polygon with the corners rounded off. It is the negative
+    space of four circles, which is why the edges curve inward rather than
+    merely softening: each edge is a circular arc of radius R centred on the
+    corner it faces.
+
+    With the star's tips at (256,0), (512,256), (256,512) and (0,256), the four
+    circles sit at the corners of the square — (512,0), (512,512), (0,512),
+    (0,0) — each with radius 256. Every circle passes through the two tips
+    beside it, so the arcs meet exactly at the points and the shape closes with
+    no seam. Change R and the circles have to move with it; that is the whole
+    geometry.
+
+    The star occupies the full viewBox. Padding is a decision for whatever is
+    placing it — an app icon needs a margin, a favicon does not — so it is not
+    baked in here.
+  -->
+
+  <defs>
+    <!--
+      Bottom-left to top-right, light into dark, in user space so the angle is
+      exactly 45° rather than whatever the bounding box would skew it to.
+    -->
+    <linearGradient id="vega-body" gradientUnits="userSpaceOnUse"
+                    x1="0" y1="512" x2="512" y2="0">
+      <stop offset="0" stop-color="#d0c9ca"/>
+      <stop offset="1" stop-color="#797979"/>
+    </linearGradient>
+
+    <!--
+      The same axis reversed, for the smaller star in the middle. Reversed
+      rather than recoloured: it stays in the one palette, and running the
+      gradient the other way is what keeps the inner star legible against the
+      outer one at both ends instead of matching it and disappearing.
+    -->
+    <linearGradient id="vega-spark" gradientUnits="userSpaceOnUse"
+                    x1="146" y1="366" x2="366" y2="146">
+      <stop offset="0" stop-color="#6f6f6f"/>
+      <stop offset="1" stop-color="#efebec"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Tips at the four compass points; each edge is an arc centred on the
+       corner between them. -->
+  <path fill="url(#vega-body)"
+        d="M 512,256
+           A 256,256 0 0 1 256,0
+           A 256,256 0 0 1 0,256
+           A 256,256 0 0 1 256,512
+           A 256,256 0 0 1 512,256 Z"/>
+
+  <!-- The same construction at 0.215 scale, centred. Small enough to read as a
+       glint inside the mark rather than as a second logo competing with it. -->
+  <path fill="url(#vega-spark)"
+        d="M 366,256
+           A 110,110 0 0 1 256,146
+           A 110,110 0 0 1 146,256
+           A 110,110 0 0 1 256,366
+           A 110,110 0 0 1 366,256 Z"/>
+</svg>

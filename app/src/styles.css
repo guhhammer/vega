@@ -626,6 +626,53 @@ button:focus-visible,
   flex: none;
 }
 
+/* How many arrived while you were elsewhere.
+   Accent rather than red: a message waiting is not an alarm, and the accent is
+   already the colour this interface uses for "there is something to do here".
+   Tabular figures so a column of badges does not jitter as counts change, and
+   a minimum width so a single digit is still a disc rather than a sliver. */
+.unread {
+  flex: none;
+  min-width: 1.35rem;
+  padding: 0 0.35rem;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  line-height: 1.35rem;
+  text-align: center;
+}
+
+/* An unread row leans forward: the name goes full strength and the short id
+   below it stops competing. Weight rather than colour, so the badge stays the
+   only accented thing in the list. */
+.contact[data-unread="true"] .name {
+  color: var(--ink);
+}
+
+.contact[data-unread="true"] .sub {
+  opacity: 0.7;
+}
+
+/* Riding on the back arrow, where the list is off screen entirely. */
+.back {
+  position: relative;
+  overflow: visible;
+}
+
+.back .unread {
+  position: absolute;
+  top: -2px;
+  right: -4px;
+  min-width: 1.05rem;
+  line-height: 1.05rem;
+  font-size: 0.62rem;
+  border: 2px solid var(--surface);
+}
+
 /* ---- the bar at the bottom of the list ----------------------------------- */
 
 .sidebar footer {

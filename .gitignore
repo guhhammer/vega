@@ -1,6 +1,5 @@
 .todo
 .references
-.github-example*
 
 /target
 node_modules/
@@ -12,6 +11,15 @@ app/src-tauri/gen/
 /release/
 
 logs/
+
+# Left behind by assets/logo/render.py. The PNGs it writes *are* committed —
+# they are the logo — but its bytecode cache is not.
+__pycache__/
+
+# Android signing keys. There should never be one in the tree, and an accident
+# with `keytool -keystore` in the wrong directory should not become a commit.
+*.jks
+*.keystore
 
 .env
 .env.*

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo/png/vega-mark-256.png" alt="" width="112" height="112">
+</p>
+
 # Vega
 
 An encrypted messenger with no server. Peers find each other, carry each other's
@@ -11,15 +15,27 @@ that does *not* protect against, is in
 
 ## Download
 
+[**vega.guhhammer.dev**](https://vega.guhhammer.dev) offers the right file for
+whatever you are reading this on. Everything is also here:
+
 | Platform | File |
 |---|---|
 | Linux (any distribution) | [`Vega-linux-x86_64.AppImage`](https://github.com/guhhammer/vega/releases/latest/download/Vega-linux-x86_64.AppImage) |
 | Debian, Ubuntu | [`Vega-linux-amd64.deb`](https://github.com/guhhammer/vega/releases/latest/download/Vega-linux-amd64.deb) |
 | macOS (Intel and Apple silicon) | [`Vega-macos-universal.dmg`](https://github.com/guhhammer/vega/releases/latest/download/Vega-macos-universal.dmg) |
 | Windows | [`Vega-windows-x86_64-setup.exe`](https://github.com/guhhammer/vega/releases/latest/download/Vega-windows-x86_64-setup.exe) |
+| Android 7 and later | [`Vega-android-universal.apk`](https://github.com/guhhammer/vega/releases/latest/download/Vega-android-universal.apk) |
 
-Neither the macOS nor the Windows build is signed, so the first open will show a
-warning from the operating system.
+**Android is a sideload, and there is no store listing coming.** A store entry
+means a review queue, a developer account tied to a legal identity, and a
+company whose rules can change under a messenger whose whole point is that no
+third party sits in the middle. Open the `.apk` on the phone and allow the
+install when asked; one file carries all three phone architectures. Delivery
+there happens only while the app is open until the foreground service is written
+— see [`.documentation/android.md`](.documentation/android.md).
+
+None of the builds is code-signed, so the first open will show a warning from
+the operating system.
 [`SHA256SUMS.txt`](https://github.com/guhhammer/vega/releases/latest) on the
 release lists the checksum of each file above — worth checking, and worth more
 than a certificate.
@@ -27,7 +43,9 @@ than a certificate.
 Per-platform steps, including how to get past those warnings and where Vega
 keeps its data, are in
 [`.documentation/installing.md`](.documentation/installing.md). There is nothing
-to sign up for: the first launch generates an account on the device.
+to sign up for: the first launch generates an account on the device — and every
+install generates its own. One account does not span two devices yet; see
+[a second device](#a-second-device) for what to do instead.
 
 **Nothing here has been audited.** Read the [security notes](#security-notes)
 before trusting it with anything that matters.
@@ -88,6 +106,26 @@ It prints its address. Put that in `seeds.json` in the app's data directory — 
 plain JSON array of multiaddrs — and restart. No rebuild needed. A seed holds no
 key that can read anything, and cannot withhold a message it never sees.
 
+### A second device
+
+**By default a second device is a second account.** The first launch generates an
+identity on the device and nothing imports an existing one, so installing Vega on
+a laptop and on a phone gives you two accounts rather than one. This is where the
+project is today, not a decision to keep it that way.
+
+Until pairing exists, add yourself as a contact: paste the laptop's invite into
+the phone, and the phone's into the laptop. Messages and files then move between
+your own machines exactly as they do to anybody else, end to end encrypted the
+same way. What you do not get is one identity — a conversation opened on the
+laptop stays on the laptop, each device shows its own ten words, and a contact
+who wants to reach you on both has to hold both invites.
+
+The crypto for the real thing is already there — `Identity::adopt`, and the
+sigchain accepts device-signed additions. What is missing is the pairing flow
+(SPAKE2 over a six-word code, per
+[`.documentation/design.md`](.documentation/design.md)), and a rushed one would
+be worse than none.
+
 ## How a message travels
 
 1. Encrypted with Olm — a separate ciphertext for every one of the recipient's
@@ -111,7 +149,7 @@ key that can read anything, and cannot withhold a message it never sees.
 | Delivery receipts | done, tested — the outbox clears when the recipient confirms decryption, not when a peer accepts bytes |
 | Files, up to 10 MB | done, tested — sent as 96 KiB chunks, each an ordinary sealed message, reassembled and hash-checked on arrival. Not copied to the sender's own devices, and anything past ~3 MB needs both people online at once |
 | Key storage | platform keyring (Secret Service / Keychain / Credential Manager), with a 0600 file where none exists |
-| Device linking (second device on one account) | the crypto is there — `Identity::adopt`, and the sigchain accepts device-signed additions — but there is no pairing flow, so an account is one device today |
+| Device linking (second device on one account) | the crypto is there — `Identity::adopt`, and the sigchain accepts device-signed additions — but there is no pairing flow, so by default a second device is a second account ([what to do instead](#a-second-device)) |
 | Android | cross-compiles; foreground service and multicast lock plugins not written (see `.documentation/android.md`) |
 | Groups, T5 offline mesh | not started |
 
@@ -124,9 +162,11 @@ around it has not.
 
 ### Known weaknesses, not yet fixed
 
-- **Device linking is not implemented.** An account is one device. The crypto
-  exists and the sigchain accepts device-signed additions; the pairing flow does
-  not, and a rushed one would be worse than none.
+- **Device linking is not implemented.** An account is one device, so by default
+  a second device is a second account, added to the first as a contact —
+  see [a second device](#a-second-device). The crypto exists and the sigchain
+  accepts device-signed additions; the pairing flow does not, and a rushed one
+  would be worse than none.
 - **What is encrypted at rest is the content, not the metadata.** Message
   bodies, contacts, chains, queued envelopes and received files are stored
   sealed under the device key. The database keys are not: which account ids you

@@ -181,8 +181,56 @@ case "${1:-check}" in
 
   android)
     ensure_npm
-    # Needs ANDROID_HOME and NDK_HOME; `tauri android init` is a one-time step.
-    (cd app && npm run tauri android build)
+    : "${ANDROID_HOME:?set ANDROID_HOME to the SDK — see .documentation/android.md}"
+    : "${NDK_HOME:?set NDK_HOME to the NDK inside the SDK — see .documentation/android.md}"
+
+    # gen/ is generated and gitignored, so this is a first-run step here and
+    # every-run step in CI. `init` is idempotent: it rewrites the Gradle project
+    # from tauri.conf.json and leaves an existing one alone.
+    [ -d app/src-tauri/gen/android ] || (cd app && npm run tauri android init)
+
+    # Named explicitly rather than left to default, because the default set
+    # includes i686-linux-android — an architecture no phone has shipped in a
+    # decade, and one more Rust target to keep installed for nothing.
+    (cd app && npm run tauri android build -- --apk --target aarch64 armv7 x86_64)
+
+    mkdir -p "$STAGE"
+    apk=app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
+    if [ ! -f "$apk" ]; then
+      echo "No APK at $apk — the Gradle output layout may have changed." >&2
+      exit 1
+    fi
+
+    # Android will not install an unsigned package, so an unsigned APK is not a
+    # release artifact, it is a build intermediate. Signing needs a key, and the
+    # key is deliberately not in this repository.
+    if [ -n "${VEGA_ANDROID_KEYSTORE:-}" ]; then
+      : "${VEGA_ANDROID_KEYSTORE_PASS:?VEGA_ANDROID_KEYSTORE is set but VEGA_ANDROID_KEYSTORE_PASS is not}"
+      : "${VEGA_ANDROID_KEY_ALIAS:?VEGA_ANDROID_KEYSTORE is set but VEGA_ANDROID_KEY_ALIAS is not}"
+
+      # The newest build-tools present. Both binaries live there and neither is
+      # on PATH by default.
+      tools="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n1)"
+      "$tools/zipalign" -p -f 4 "$apk" "$STAGE/.aligned.apk"
+      "$tools/apksigner" sign \
+        --ks "$VEGA_ANDROID_KEYSTORE" \
+        --ks-pass "env:VEGA_ANDROID_KEYSTORE_PASS" \
+        --ks-key-alias "$VEGA_ANDROID_KEY_ALIAS" \
+        --key-pass "env:${VEGA_ANDROID_KEY_PASS_VAR:-VEGA_ANDROID_KEYSTORE_PASS}" \
+        --out "$STAGE/Vega-android-universal.apk" \
+        "$STAGE/.aligned.apk"
+      rm -f "$STAGE/.aligned.apk" "$STAGE/.aligned.apk.idsig"
+      echo
+      echo "Signed: $STAGE/Vega-android-universal.apk"
+    else
+      cp "$apk" "$STAGE/Vega-android-universal-unsigned.apk"
+      echo
+      echo "Built unsigned: $STAGE/Vega-android-universal-unsigned.apk"
+      echo "Android refuses to install an unsigned package. Set"
+      echo "VEGA_ANDROID_KEYSTORE, VEGA_ANDROID_KEYSTORE_PASS and"
+      echo "VEGA_ANDROID_KEY_ALIAS to get an installable one — see"
+      echo ".documentation/android.md."
+    fi
     ;;
 
   node)

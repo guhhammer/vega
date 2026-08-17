@@ -187,6 +187,8 @@ pub struct ContactView {
     /// Their own phrase, independent of ours — the one they read out when they
     /// sent the invite. Kept so it can still be compared after the fact.
     identity_words: String,
+    /// Messages that arrived since this conversation was last on screen.
+    unread: usize,
 }
 
 /// What an invite claims, before anything is saved.
@@ -309,19 +311,18 @@ async fn add_contact(invite: String, ctx: State<'_, Ctx>) -> Result<ContactView,
         .get_contact(&id)
         .map_err(fail)?
         .ok_or("contact vanished immediately after being added")?;
-    Ok(view_of(&contact, &rt.identity.account_id))
+    Ok(view_of(&contact, &rt))
 }
 
 #[tauri::command]
 async fn list_contacts(ctx: State<'_, Ctx>) -> Result<Vec<ContactView>, String> {
     let rt = ctx.shared.lock().await;
-    let me = rt.identity.account_id;
     Ok(rt
         .store
         .list_contacts()
         .map_err(fail)?
         .iter()
-        .map(|c| view_of(c, &me))
+        .map(|c| view_of(c, &rt))
         .collect())
 }
 
@@ -395,7 +396,42 @@ async fn rename_contact(
     // falls back to is their short id — which is at least true.
     contact.display_name = name.trim().to_string();
     rt.store.put_contact(&contact).map_err(fail)?;
-    Ok(view_of(&contact, &rt.identity.account_id))
+    Ok(view_of(&contact, &rt))
+}
+
+/// Move a conversation's read marker up to whatever is in it now.
+///
+/// Called when the conversation is on screen, which is the only thing this
+/// program can honestly observe about reading. It is deliberately its own
+/// command rather than a side effect of [`conversation`]: a query that quietly
+/// writes is a query nobody can call twice with confidence, and the interface
+/// legitimately re-reads a thread — on a reload, on a window that was left
+/// open — at moments that are not somebody sitting down to read it.
+///
+/// Returns how many are still unread, which is always zero here, so the caller
+/// can settle the badge without a second round trip.
+#[tauri::command]
+async fn mark_read(with: String, ctx: State<'_, Ctx>) -> Result<usize, String> {
+    let account = AccountId::from_display(&with).map_err(fail)?;
+    let rt = ctx.shared.lock().await;
+
+    let Some(mut contact) = rt.store.get_contact(&account).map_err(fail)? else {
+        // A conversation with somebody already deleted. Nothing to mark, and
+        // nothing worth interrupting the interface over.
+        return Ok(0);
+    };
+
+    let last = rt.store.last_seq(&account).map_err(fail)?;
+    // Never backwards: a marker that moved down would resurrect messages that
+    // have been read, and `last_seq` is zero for a conversation with no history.
+    if last > contact.read_seq {
+        contact.read_seq = last;
+        rt.store.put_contact(&contact).map_err(fail)?;
+    }
+    Ok(rt
+        .store
+        .unread(&account, contact.read_seq)
+        .unwrap_or_default())
 }
 
 /// Record that the safety words were compared, and how it went.
@@ -424,7 +460,7 @@ async fn set_verified(
 
     contact.verified = verified;
     rt.store.put_contact(&contact).map_err(fail)?;
-    Ok(view_of(&contact, &rt.identity.account_id))
+    Ok(view_of(&contact, &rt))
 }
 
 /// Rename this device, for this installation only.
@@ -662,7 +698,8 @@ async fn network(ctx: State<'_, Ctx>) -> Result<NetworkView, String> {
     })
 }
 
-fn view_of(c: &vega_core::Contact, me: &AccountId) -> ContactView {
+fn view_of(c: &vega_core::Contact, rt: &Runtime) -> ContactView {
+    let me = &rt.identity.account_id;
     ContactView {
         account_id: c.account_id.to_display(),
         short_id: c.account_id.short(),
@@ -671,6 +708,13 @@ fn view_of(c: &vega_core::Contact, me: &AccountId) -> ContactView {
         safety_number: invite::Invite::safety_number(me, &c.account_id),
         safety_words: invite::Invite::safety_words(me, &c.account_id),
         identity_words: invite::Invite::identity_words(&c.account_id),
+        // A count that cannot be read is shown as nothing rather than taken as
+        // a reason to fail the whole contact list. The badge is the least
+        // important thing on the row.
+        unread: rt
+            .store
+            .unread(&c.account_id, c.read_seq)
+            .unwrap_or_default(),
     }
 }
 
@@ -1112,6 +1156,7 @@ pub fn run() {
             rename_contact,
             rename_device,
             set_verified,
+            mark_read,
             clear_chat,
             clear_all_history,
             history,

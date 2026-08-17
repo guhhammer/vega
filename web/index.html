@@ -1,0 +1,481 @@
+<!doctype html>
+<!--
+  vega-web: the download page.
+
+  Deliberately one file with nothing fetched from anywhere. A page that hands
+  out a messenger built to avoid third parties should not itself pull a font
+  from one CDN and a script from another — every one of those is a request that
+  says who is about to download an encrypted messenger, and to whom.
+
+  Every download link points at /releases/latest/download/<stable name>, which
+  GitHub resolves to whatever the newest published release holds. So this page
+  does not have to be rebuilt when a version ships, and a link written here
+  keeps working. Those names come from release.yml and `./make dist`; the three
+  agree on purpose.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Vega — an encrypted messenger with no server</title>
+    <meta
+      name="description"
+      content="Vega is an encrypted messenger with no server. Peers find each other, carry each other's ciphertext, and hold each other's mail. Downloads for Linux, macOS, Windows and Android."
+    />
+    <meta name="color-scheme" content="dark light" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cpath fill='%23a8a3a3' d='M512 256A256 256 0 0 1 256 0 256 256 0 0 1 0 256a256 256 0 0 1 256 256 256 256 0 0 1 256-256Z'/%3E%3C/svg%3E"
+    />
+
+    <style>
+      /* The application's own tokens, cut down to what one page needs. Keeping
+         the names identical means a change made there can be carried here
+         without translating anything. */
+      :root {
+        color-scheme: dark;
+        --paper: #0a0f11;
+        --surface: #121a1c;
+        --surface-2: #182326;
+        --ink: #dce4e3;
+        --ink-2: #9aa8a8;
+        --ink-3: #6b7a7a;
+        --line: #1f2b2e;
+        --line-2: #2c3d41;
+        --accent: #57b6c6;
+        --accent-ink: #05171b;
+        --accent-soft: #1b3940;
+        --warn: #e4785c;
+        --mono: ui-monospace, "SF Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+        --sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+        --r-md: 12px;
+        --r-lg: 16px;
+        --r-pill: 999px;
+      }
+
+      @media (prefers-color-scheme: light) {
+        :root {
+          color-scheme: light;
+          --paper: #e9edec;
+          --surface: #f8faf9;
+          --surface-2: #eaefee;
+          --ink: #0d1315;
+          --ink-2: #47555a;
+          --ink-3: #6f7d80;
+          --line: #d5dbda;
+          --line-2: #bcc6c5;
+          --accent: #0b6270;
+          --accent-ink: #ffffff;
+          --accent-soft: #d6e8ea;
+          --warn: #a2472a;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          transition: none !important;
+          animation: none !important;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font-family: var(--sans);
+        font-size: 16px;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      main {
+        max-width: 60ch;
+        margin: 0 auto;
+        padding: 3rem 1.25rem 4rem;
+      }
+
+      /* ---- masthead ---- */
+
+      .mark {
+        width: 84px;
+        height: 84px;
+        display: block;
+      }
+
+      h1 {
+        font-size: 2.6rem;
+        letter-spacing: 0.06em;
+        font-weight: 600;
+        margin: 1rem 0 0.25rem;
+      }
+
+      .tagline {
+        margin: 0 0 0.5rem;
+        font-size: 1.15rem;
+        color: var(--ink-2);
+      }
+
+      .sub {
+        color: var(--ink-3);
+        font-size: 0.95rem;
+      }
+
+      /* ---- downloads ---- */
+
+      .primary-download {
+        display: block;
+        margin: 2.5rem 0 0.75rem;
+        padding: 1rem 1.25rem;
+        border-radius: var(--r-lg);
+        background: var(--accent);
+        color: var(--accent-ink);
+        text-decoration: none;
+        font-weight: 700;
+        font-size: 1.1rem;
+        text-align: center;
+        transition: filter 150ms ease;
+      }
+
+      .primary-download:hover {
+        filter: brightness(1.08);
+      }
+
+      .primary-download .note {
+        display: block;
+        font-weight: 500;
+        font-size: 0.8rem;
+        opacity: 0.85;
+        margin-top: 0.15rem;
+      }
+
+      .all-downloads {
+        border: 1px solid var(--line);
+        border-radius: var(--r-lg);
+        background: var(--surface);
+        overflow: hidden;
+        margin-top: 1.5rem;
+      }
+
+      .all-downloads summary {
+        padding: 0.75rem 1rem;
+        cursor: pointer;
+        font-size: 0.9rem;
+        color: var(--ink-2);
+      }
+
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        padding: 0.7rem 1rem;
+        border-top: 1px solid var(--line);
+      }
+
+      .row .what {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .row .what b {
+        display: block;
+        font-weight: 600;
+      }
+
+      .row .what span {
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        color: var(--ink-3);
+        overflow-wrap: anywhere;
+      }
+
+      .row a {
+        flex: none;
+        padding: 0.4rem 0.9rem;
+        border-radius: var(--r-pill);
+        border: 1px solid var(--line-2);
+        color: var(--ink);
+        text-decoration: none;
+        font-size: 0.85rem;
+      }
+
+      .row a:hover {
+        border-color: var(--accent);
+        background: var(--surface-2);
+      }
+
+      /* ---- prose ---- */
+
+      h2 {
+        font-size: 1.05rem;
+        margin: 2.5rem 0 0.5rem;
+      }
+
+      p {
+        margin: 0 0 0.75rem;
+      }
+
+      a {
+        color: var(--accent);
+      }
+
+      code {
+        font-family: var(--mono);
+        font-size: 0.85em;
+        background: var(--surface-2);
+        padding: 0.1em 0.35em;
+        border-radius: 5px;
+      }
+
+      .warning {
+        border-left: 3px solid var(--warn);
+        padding: 0.1rem 0 0.1rem 0.9rem;
+        margin: 1.5rem 0;
+        color: var(--ink-2);
+        font-size: 0.95rem;
+      }
+
+      .aside {
+        border-left: 3px solid var(--accent);
+        padding: 0.1rem 0 0.1rem 0.9rem;
+        margin: 1.5rem 0;
+        color: var(--ink-2);
+        font-size: 0.95rem;
+      }
+
+      footer {
+        margin-top: 3.5rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid var(--line);
+        color: var(--ink-3);
+        font-size: 0.85rem;
+      }
+    </style>
+  </head>
+
+  <body>
+    <main>
+      <!-- The mark, inline rather than linked: one file, no second request.
+           Same geometry as assets/logo/vega-mark.svg. -->
+      <svg class="mark" viewBox="0 0 512 512" role="img" aria-label="Vega">
+        <defs>
+          <linearGradient id="body" gradientUnits="userSpaceOnUse" x1="0" y1="512" x2="512" y2="0">
+            <stop offset="0" stop-color="#d0c9ca" />
+            <stop offset="1" stop-color="#797979" />
+          </linearGradient>
+          <linearGradient id="spark" gradientUnits="userSpaceOnUse" x1="146" y1="366" x2="366" y2="146">
+            <stop offset="0" stop-color="#6f6f6f" />
+            <stop offset="1" stop-color="#efebec" />
+          </linearGradient>
+        </defs>
+        <path
+          fill="url(#body)"
+          d="M512,256A256,256 0 0 1 256,0A256,256 0 0 1 0,256A256,256 0 0 1 256,512A256,256 0 0 1 512,256Z"
+        />
+        <path
+          fill="url(#spark)"
+          d="M366,256A110,110 0 0 1 256,146A110,110 0 0 1 146,256A110,110 0 0 1 256,366A110,110 0 0 1 366,256Z"
+        />
+      </svg>
+
+      <h1>Vega</h1>
+      <p class="tagline">An encrypted messenger with no server.</p>
+      <p class="sub">
+        Peers find each other, carry each other's ciphertext, and hold each
+        other's mail. No node can read a message, and no node's disappearance
+        kills the network.
+      </p>
+
+      <!-- Filled in by the script below. Written into the markup as the Linux
+           build rather than left empty, so a browser with JavaScript off gets a
+           working link instead of a dead button. -->
+      <a
+        class="primary-download"
+        id="primary"
+        href="https://github.com/guhhammer/vega/releases/latest/download/Vega-linux-x86_64.AppImage"
+      >
+        <span id="primary-label">Download for Linux</span>
+        <span class="note" id="primary-note">AppImage · runs on any distribution</span>
+      </a>
+
+      <details class="all-downloads">
+        <summary>Every download</summary>
+
+        <div class="row">
+          <div class="what">
+            <b>Android 7 and later</b>
+            <span>Vega-android-universal.apk</span>
+          </div>
+          <a href="https://github.com/guhhammer/vega/releases/latest/download/Vega-android-universal.apk">Get</a>
+        </div>
+        <div class="row">
+          <div class="what">
+            <b>Linux — any distribution</b>
+            <span>Vega-linux-x86_64.AppImage</span>
+          </div>
+          <a href="https://github.com/guhhammer/vega/releases/latest/download/Vega-linux-x86_64.AppImage">Get</a>
+        </div>
+        <div class="row">
+          <div class="what">
+            <b>Debian, Ubuntu</b>
+            <span>Vega-linux-amd64.deb</span>
+          </div>
+          <a href="https://github.com/guhhammer/vega/releases/latest/download/Vega-linux-amd64.deb">Get</a>
+        </div>
+        <div class="row">
+          <div class="what">
+            <b>macOS — Intel and Apple silicon</b>
+            <span>Vega-macos-universal.dmg</span>
+          </div>
+          <a href="https://github.com/guhhammer/vega/releases/latest/download/Vega-macos-universal.dmg">Get</a>
+        </div>
+        <div class="row">
+          <div class="what">
+            <b>Windows</b>
+            <span>Vega-windows-x86_64-setup.exe</span>
+          </div>
+          <a href="https://github.com/guhhammer/vega/releases/latest/download/Vega-windows-x86_64-setup.exe">Get</a>
+        </div>
+        <div class="row">
+          <div class="what">
+            <b>Checksums</b>
+            <span>SHA256SUMS.txt</span>
+          </div>
+          <a href="https://github.com/guhhammer/vega/releases/latest/download/SHA256SUMS.txt">Get</a>
+        </div>
+      </details>
+
+      <p class="warning">
+        <strong>Nothing here has been audited.</strong> vodozemac, which
+        implements the ratchet, has been audited by Least Authority. The code
+        around it has not been audited by anyone. Read
+        <a href="https://github.com/guhhammer/vega/blob/main/SECURITY.md">SECURITY.md</a>
+        before trusting it with anything that matters.
+      </p>
+
+      <h2>Android is a sideload, not a store listing</h2>
+      <p>
+        There is no Play Store entry and there is not going to be one. A store
+        listing means a review queue, a developer account, and a company whose
+        rules can change under a messenger whose entire point is that no third
+        party sits in the middle. The <code>.apk</code> above is the same build,
+        handed to you directly.
+      </p>
+      <p>
+        Open it on the phone and allow installing from this source when Android
+        asks. One file carries all three phone architectures, so there is no
+        wrong choice to make.
+      </p>
+      <p class="aside">
+        Delivery on Android currently happens only while the app is open. The
+        foreground service that would keep the socket alive in the background is
+        not written yet, so a message sent to a phone with Vega closed arrives
+        the next time it is opened rather than immediately. Everything else —
+        encryption, contacts, files — works as it does on the desktop.
+      </p>
+
+      <h2>The first open will warn you</h2>
+      <p>
+        None of these builds is code-signed. macOS will say it cannot verify the
+        developer, Windows SmartScreen will say it protected your PC, and
+        Android will ask whether you trust this source. Signing certificates
+        cost money and identify a legal person; neither is a thing this project
+        has. What it has instead is
+        <code>SHA256SUMS.txt</code> on every release and the whole source tree in
+        the open.
+      </p>
+
+      <h2>Adding somebody</h2>
+      <p>
+        There is no directory to search and no server to ask, so you add each
+        other by hand: send them your invite, and paste theirs. Both ends, or
+        neither — an invite is not a request the other side can accept.
+      </p>
+      <p>
+        Vega shows your identity as ten words. Read them out while you hand the
+        invite over; if the words on their screen match yours, it arrived as you
+        sent it. That comparison is the only thing that rules out somebody
+        having swapped it in transit.
+      </p>
+
+      <h2>A second device is a second account</h2>
+      <p>
+        Install Vega on a laptop and on a phone and you have two accounts, not
+        one. The first launch generates an identity on the device and nothing
+        imports an existing one, so there is no way to sign the second install
+        into the first. That is where the project is today rather than a
+        decision to keep it that way — the cryptography for linking devices is
+        already in the code, the pairing flow that would drive it is not.
+      </p>
+      <p>
+        Until it is, add yourself as a contact: paste the laptop's invite into
+        the phone and the phone's into the laptop. Messages and files then move
+        between your own machines exactly as they move to anybody else, and are
+        encrypted the same way. What you do not get is one identity — a
+        conversation opened on the laptop stays on the laptop, each device shows
+        its own ten words, and somebody who wants to reach you on both has to
+        hold both invites.
+      </p>
+
+      <footer>
+        <p>
+          MIT licensed ·
+          <a href="https://github.com/guhhammer/vega">Source on GitHub</a> ·
+          <a href="https://github.com/guhhammer/vega/releases">All releases</a> ·
+          <a href="https://github.com/guhhammer/vega/blob/main/SECURITY.md">Security notes</a>
+        </p>
+        <p>
+          Built by peers, for peers. Run a
+          <a href="https://github.com/guhhammer/vega/blob/main/.documentation/running-a-seed.md">seed node</a>
+          if you would like to make the network easier to join.
+        </p>
+      </footer>
+    </main>
+
+    <script>
+      // Pick the button. Guesswork, so it only ever changes which download is
+      // offered first — every one of them stays reachable under "Every
+      // download", and the markup already names a working default.
+      (function () {
+        var ua = navigator.userAgent;
+        var base = "https://github.com/guhhammer/vega/releases/latest/download/";
+
+        // Android before Linux: every Android user agent also says Linux, so
+        // the order of these tests is the whole of the logic.
+        var pick = { file: "Vega-linux-x86_64.AppImage", label: "Download for Linux", note: "AppImage · runs on any distribution" };
+
+        if (/Android/i.test(ua)) {
+          pick = { file: "Vega-android-universal.apk", label: "Download for Android", note: "APK · sideload, see below" };
+        } else if (/iPhone|iPad|iPod/i.test(ua)) {
+          // Not a download. iOS does not let a background process hold a
+          // listening socket, so there is no build to offer and saying so is
+          // better than handing somebody an installer for another machine.
+          pick = null;
+        } else if (/Mac OS X|Macintosh/i.test(ua)) {
+          pick = { file: "Vega-macos-universal.dmg", label: "Download for macOS", note: "Universal · Intel and Apple silicon" };
+        } else if (/Windows/i.test(ua)) {
+          pick = { file: "Vega-windows-x86_64-setup.exe", label: "Download for Windows", note: "Installs for the current user, no admin prompt" };
+        }
+
+        var button = document.getElementById("primary");
+        if (!pick) {
+          button.removeAttribute("href");
+          button.style.background = "var(--surface-2)";
+          button.style.color = "var(--ink-2)";
+          button.style.cursor = "default";
+          document.getElementById("primary-label").textContent = "No iOS build";
+          document.getElementById("primary-note").textContent =
+            "iOS will not let a messenger hold a socket in the background. Downloads for other platforms are below.";
+          return;
+        }
+
+        button.href = base + pick.file;
+        document.getElementById("primary-label").textContent = pick.label;
+        document.getElementById("primary-note").textContent = pick.note;
+      })();
+    </script>
+  </body>
+</html>

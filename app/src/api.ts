@@ -28,6 +28,8 @@ export interface Contact {
    * sent the invite, kept so it can still be compared after the fact.
    */
   identity_words: string;
+  /** Messages that arrived since this conversation was last on screen. */
+  unread: number;
 }
 
 /** What an invite claims to be, before anything has been saved. */
@@ -112,6 +114,13 @@ export const api = {
     invoke<void>("send_file", { to, name, data }),
   conversation: (that: string) =>
     invoke<Message[]>("conversation", { with: that }),
+
+  /**
+   * Move a conversation's read marker to the end of what is in it. Called when
+   * the conversation is on screen — which is the only thing this program can
+   * honestly observe about reading — and returns what is left unread.
+   */
+  markRead: (that: string) => invoke<number>("mark_read", { with: that }),
   network: () => invoke<Network>("network"),
 
   /**

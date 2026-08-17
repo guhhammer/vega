@@ -7,7 +7,7 @@ does not answer a question nobody else does should not exist.
 |---|---|---|
 | [`ci.yml`](ci.yml) | push to `main`, every PR | fmt, clippy, tests, frontend build |
 | [`tag.yml`](tag.yml) | push to `main`, manual | Tags a commit that bumps the version, then calls `release.yml` |
-| [`release.yml`](release.yml) | `v*` tags, `tag.yml`, manual | Installers for Linux, macOS and Windows on a draft release, plus checksums |
+| [`release.yml`](release.yml) | `v*` tags, `tag.yml`, manual | Installers for Linux, macOS, Windows and Android on a draft release, plus checksums and the download page |
 
 ## Why they are split this way
 
@@ -31,14 +31,29 @@ otherwise leave the tag sitting there with nothing built.
 them. Shipping a messenger that fails its own authentication tests would be
 worse than shipping late.
 
-It is also the one workflow with four jobs rather than one, and the shape is
+It is also the one workflow with several jobs rather than one, and the shape is
 deliberate. The tag is checked against the version in the tree first, so a
 mismatch costs seconds instead of three platform builds. The release is then
-created **once**, by a job of its own — letting the three build jobs each
+created **once**, by a job of its own — letting the build jobs each
 create-if-missing is a race, since they start together, all see no release, and
-two of them fail or duplicate it. Checksums come last, because they can only
-cover files that have finished uploading. See
+two of them fail or duplicate it. Checksums come after every upload, because
+they can only cover files that have finished arriving. See
 [`../../.documentation/releasing.md`](../../.documentation/releasing.md).
+
+**Android is one job, not a fourth entry in the build matrix.** It shares
+nothing with the desktop builds: no webview to link against, no Tauri bundler,
+a Gradle project that is generated at build time, and a signing step the others
+do not have. It also skips itself, with a warning, when
+`ANDROID_KEYSTORE_BASE64` is absent — a release without an Android key is still
+a release, and Android refuses to install an unsigned package, so uploading one
+would be worse than uploading none. Key setup is in
+[`../../.documentation/android.md`](../../.documentation/android.md).
+
+**The download page ships from here too.** `web/` is one static file that
+fetches nothing, and every link on it resolves through
+`/releases/latest/download/…` — so it only ever goes out of date when a release
+does, which is exactly when this workflow runs. That is why it is a job here
+rather than a fourth workflow.
 
 ## Conventions
 

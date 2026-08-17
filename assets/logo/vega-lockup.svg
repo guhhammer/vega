@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 320" width="900" height="320" role="img" aria-labelledby="title">
+  <title id="title">Vega</title>
+
+  <!--
+    The mark and the word on one line. The mark is the same geometry as
+    vega-mark.svg, scaled and moved rather than redrawn — see that file for how
+    the shape is constructed.
+
+    The word is live text, so this file is editable and so the shape of the
+    letters is not frozen into a path nobody can adjust. That means it depends
+    on the font being present: Quicksand first, then whatever geometric sans
+    the machine has, and a generic sans-serif last. Anywhere that has to look
+    right regardless — a README, a web page, somebody else's slide deck —
+    should use the PNG in png/, which has the face baked in.
+
+    `currentColor` on the word, so one file serves a dark background and a
+    light one. Set `color` on the element that embeds it.
+  -->
+
+  <defs>
+    <linearGradient id="lockup-body" gradientUnits="userSpaceOnUse"
+                    x1="26" y1="259" x2="224" y2="61">
+      <stop offset="0" stop-color="#d0c9ca"/>
+      <stop offset="1" stop-color="#797979"/>
+    </linearGradient>
+    <linearGradient id="lockup-spark" gradientUnits="userSpaceOnUse"
+                    x1="103" y1="203" x2="147" y2="117">
+      <stop offset="0" stop-color="#6f6f6f"/>
+      <stop offset="1" stop-color="#efebec"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Tips on the compass points of a 198px box inset 26px from the edge. -->
+  <path fill="url(#lockup-body)"
+        d="M 224,160
+           A 99,99 0 0 1 125,61
+           A 99,99 0 0 1 26,160
+           A 99,99 0 0 1 125,259
+           A 99,99 0 0 1 224,160 Z"/>
+  <path fill="url(#lockup-spark)"
+        d="M 168,160
+           A 43,43 0 0 1 125,117
+           A 43,43 0 0 1 82,160
+           A 43,43 0 0 1 125,203
+           A 43,43 0 0 1 168,160 Z"/>
+
+  <text x="288" y="160" fill="currentColor"
+        font-family="Quicksand, Poppins, Jost, Futura, 'Century Gothic', ui-sans-serif, system-ui, sans-serif"
+        font-size="147" font-weight="600" letter-spacing="8.8"
+        dominant-baseline="central">Vega</text>
+</svg>

@@ -59,6 +59,19 @@ pub struct Contact {
     /// something new. `default` so records written before this field still load.
     #[serde(default)]
     pub chain_sent_len: u64,
+    /// The highest message sequence this conversation had when it was last on
+    /// screen. Everything above it that came *in* is what has not been read.
+    ///
+    /// A high-water mark rather than a flag per message: sequence numbers are
+    /// allocated monotonically, so one number settles the whole conversation and
+    /// nothing has to be rewritten when a message is read.
+    ///
+    /// `default` means a contact stored before this field existed comes back as
+    /// zero, so their whole history counts as unread the first time. That is the
+    /// honest answer — nothing ever recorded that it had been read — and it
+    /// costs one visit to the conversation to settle.
+    #[serde(default)]
+    pub read_seq: u64,
 }
 
 /// One Olm session at rest.
@@ -401,6 +414,53 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// The highest sequence number in a conversation, or zero if it has none.
+    ///
+    /// What a read marker is set to when the conversation is on screen. Read
+    /// from the index alone, so it costs nothing on a long history.
+    pub fn last_seq(&self, other: &AccountId) -> Result<u64> {
+        let tx = self.db.begin_read()?;
+        let index = tx.open_multimap_table(BY_CONVERSATION)?;
+        Ok(index
+            .get(other.to_display().as_str())?
+            .filter_map(|v| v.ok().map(|v| v.value()))
+            .max()
+            .unwrap_or(0))
+    }
+
+    /// How many messages *arrived* in this conversation after `after_seq`.
+    ///
+    /// Incoming only. A message you sent is not one you have to read, and a
+    /// conversation that badges itself the moment you reply would be absurd.
+    ///
+    /// Deciding that means opening each message past the marker, since the
+    /// index carries sequence numbers and nothing else. The cost is therefore
+    /// proportional to what is *unread* rather than to what is stored — a
+    /// conversation with ten years behind it and nothing new costs one index
+    /// lookup, which is the case this runs in almost every time.
+    pub fn unread(&self, other: &AccountId, after_seq: u64) -> Result<usize> {
+        let tx = self.db.begin_read()?;
+        let index = tx.open_multimap_table(BY_CONVERSATION)?;
+        let messages = tx.open_table(MESSAGES)?;
+
+        let mut count = 0;
+        for row in index.get(other.to_display().as_str())? {
+            let seq = row?.value();
+            if seq <= after_seq {
+                continue;
+            }
+            // A missing row means the index outlived the message. Not something
+            // to fail a badge over.
+            if let Some(v) = messages.get(seq)? {
+                let msg: StoredMessage = self.opened(purpose::MESSAGE, v.value())?;
+                if !msg.outgoing {
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
     }
 
     /// How many messages each conversation holds, largest first.
@@ -1059,6 +1119,7 @@ mod tests {
             added_at: NOW,
             verified: false,
             chain_sent_len: 0,
+            read_seq: 0,
         }
     }
 
@@ -1262,6 +1323,58 @@ mod tests {
         replay.seq = store.next_message_seq().unwrap();
         assert!(!store.append_message(&replay).unwrap());
         assert_eq!(store.conversation(&who, 100).unwrap().len(), 1);
+    }
+
+    /// The badge on a contact row. Wrong in either direction is bad — one way
+    /// hides a message somebody is waiting on, the other cries wolf.
+    #[test]
+    fn unread_counts_what_arrived_after_the_marker() {
+        let (store, _dir) = store();
+        let a = Identity::create("a").account_id;
+        let b = Identity::create("b").account_id;
+
+        let send = |who: AccountId, text: &str, outgoing: bool| -> u64 {
+            let seq = store.next_message_seq().unwrap();
+            store
+                .append_message(&StoredMessage {
+                    seq,
+                    conversation: who,
+                    from_account: who,
+                    from_device: DeviceId([0u8; 32]),
+                    outgoing,
+                    received_at: NOW,
+                    content: Content::new(who, NOW, seq, Body::Text { text: text.into() }),
+                })
+                .unwrap();
+            seq
+        };
+
+        // A conversation nobody has looked at yet: everything incoming counts.
+        send(a, "one", false);
+        let second = send(a, "two", false);
+        assert_eq!(store.unread(&a, 0).unwrap(), 2);
+
+        // Read up to the second, and only what came after it is left.
+        send(a, "three", false);
+        assert_eq!(store.unread(&a, second).unwrap(), 1);
+        assert_eq!(store.unread(&a, store.last_seq(&a).unwrap()).unwrap(), 0);
+
+        // Your own replies are not something to be notified about.
+        send(a, "mine", true);
+        assert_eq!(store.unread(&a, store.last_seq(&a).unwrap()).unwrap(), 0);
+        assert_eq!(
+            store.unread(&a, second).unwrap(),
+            1,
+            "a reply is not unread"
+        );
+
+        // Conversations are counted apart, and one with nothing in it is zero
+        // rather than an error.
+        send(b, "hello", false);
+        assert_eq!(store.unread(&b, 0).unwrap(), 1);
+        let empty = Identity::create("nobody").account_id;
+        assert_eq!(store.last_seq(&empty).unwrap(), 0);
+        assert_eq!(store.unread(&empty, 0).unwrap(), 0);
     }
 
     #[test]
@@ -1535,6 +1648,7 @@ mod tests {
             added_at: NOW,
             verified: false,
             chain_sent_len: 0,
+            read_seq: 0,
         };
         store.put_contact(&contact).unwrap();
         let got = store.get_contact(&identity.account_id).unwrap().unwrap();

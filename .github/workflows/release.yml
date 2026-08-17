@@ -170,9 +170,18 @@ jobs:
           | Debian, Ubuntu | `Vega-linux-amd64.deb` |
           | macOS (Intel and Apple silicon) | `Vega-macos-universal.dmg` |
           | Windows | `Vega-windows-x86_64-setup.exe` |
+          | Android 7 and later | `Vega-android-universal.apk` |
 
           Neither the macOS nor the Windows build is signed, so the first open
           will show a warning from the operating system.
+
+          **Android is a sideload, not a store listing.** Open the `.apk` on the
+          phone and allow installing from this source when asked. It carries all
+          three phone architectures, so there is one file and no wrong choice.
+          Delivery on Android is currently only while the app is open — the
+          foreground service that would keep the socket alive in the background
+          is not written yet, so messages sent to a phone with Vega closed
+          arrive when it is next opened rather than immediately.
 
           `SHA256SUMS.txt` lists the checksum of each file above.
 
@@ -373,15 +382,145 @@ jobs:
 
           gh release upload "$TAG" aliases/* --clobber
 
+  # Android, sideloaded rather than through a store.
+  #
+  # A store listing is a review queue, a developer account, and a company whose
+  # rules can change under a messenger whose whole point is that no third party
+  # is in the middle. An APK on the release page is a download, like the other
+  # four.
+  #
+  # The price is that the APK has to be signed here, with a key that lives in
+  # this repository's secrets — Android will not install an unsigned package at
+  # all. Without the key the job says so and stops, rather than uploading
+  # something that cannot be installed or failing a release the other four
+  # platforms completed. See .documentation/android.md for making the key.
+  android:
+    name: android (apk)
+    needs: [verify, create-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - name: is there a signing key
+        id: key
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE" ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set, so no APK was built. \
+            The desktop builds are unaffected. See .documentation/android.md."
+          fi
+
+      # Everything below is skipped rather than the job failing, so a release
+      # without an Android key is still a release.
+      - uses: actions/setup-java@v4
+        if: steps.key.outputs.have == 'true'
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: actions/setup-node@v4
+        if: steps.key.outputs.have == 'true'
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      # The four Android ABIs minus i686, which no phone has shipped in a
+      # decade. `./make android` names the same three.
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.key.outputs.have == 'true'
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - run: npm ci
+        if: steps.key.outputs.have == 'true'
+        working-directory: app
+
+      # The runner already carries an SDK and an NDK; ANDROID_NDK_LATEST_HOME is
+      # where it puts the newest one. Exported in the shell rather than through
+      # a step-level `env:` — the `env` context holds only what a workflow put
+      # there, so `${{ env.ANDROID_NDK_LATEST_HOME }}` would expand to nothing
+      # and the build would fail looking for a linker.
+      - name: build the apk
+        if: steps.key.outputs.have == 'true'
+        run: |
+          set -euo pipefail
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          cd app
+          npm run tauri android init
+          npm run tauri android build -- --apk --target aarch64 armv7 x86_64
+
+      # Signed with apksigner directly rather than through a Gradle signing
+      # config: `android init` regenerates the Gradle project on every run, so
+      # anything written into it would have to be re-patched here anyway.
+      - name: sign it
+        if: steps.key.outputs.have == 'true'
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          # The key exists for as long as this step runs and no longer. Written
+          # under the runner's temp directory rather than the checkout, so no
+          # later step can sweep it into an artifact.
+          keystore="$RUNNER_TEMP/vega.jks"
+          printf '%s' "$KEYSTORE" | base64 -d > "$keystore"
+
+          unsigned=app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
+          if [ ! -f "$unsigned" ]; then
+            echo "::error::no APK at $unsigned — the Gradle output layout moved"
+            exit 1
+          fi
+
+          # A key generated with `-keypass` the same as the store password —
+          # which is what keytool does when you press enter — needs no separate
+          # secret, so ANDROID_KEY_PASSWORD is optional and falls back.
+          if [ -z "${KEY_PASS:-}" ]; then
+            KEY_PASS="$KS_PASS"
+            export KEY_PASS
+          fi
+
+          tools="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n1)"
+          "$tools/zipalign" -p -f 4 "$unsigned" aligned.apk
+          "$tools/apksigner" sign \
+            --ks "$keystore" \
+            --ks-pass env:KS_PASS \
+            --ks-key-alias "$KEY_ALIAS" \
+            --key-pass env:KEY_PASS \
+            --out Vega-android-universal.apk \
+            aligned.apk
+
+          # Proof the signature is on it, rather than proof the command exited
+          # zero. An APK that fails this installs nowhere.
+          "$tools/apksigner" verify --print-certs Vega-android-universal.apk
+
+          rm -f "$keystore" aligned.apk aligned.apk.idsig
+
+      - name: upload it
+        if: steps.key.outputs.have == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: gh release upload "$TAG" Vega-android-universal.apk --clobber
+
   # Checksums cover every file on the release, so they can only be computed
-  # once all three platforms have uploaded. A platform that failed leaves the
+  # once all platforms have uploaded. A platform that failed leaves the
   # others still checksummed — the draft is inspected before publishing anyway.
   #
   # This job works on the release rather than the tree, so it deliberately does
   # not check anything out — which is why GH_REPO is set below.
   checksums:
     name: checksums
-    needs: [verify, build]
+    needs: [verify, build, android]
     if: always() && needs.build.result != 'cancelled'
     runs-on: ubuntu-latest
     steps:
@@ -411,3 +550,47 @@ jobs:
           sha256sum ./* | sed 's| \./| |' > SHA256SUMS.txt
           cat SHA256SUMS.txt
           gh release upload "$TAG" SHA256SUMS.txt --clobber
+
+  # vega-web: the download page at vega.guhhammer.dev.
+  #
+  # It lives in this workflow rather than one of its own because it is an
+  # advertisement for a release, and a release is the only thing that ever makes
+  # it out of date. Every link on it points at
+  # `/releases/latest/download/<stable name>`, which GitHub resolves against the
+  # newest *published* release — so a draft that is never published changes
+  # nothing, and the page is correct the moment one is.
+  #
+  # Needs the repository's Pages source set to "GitHub Actions" once, in
+  # Settings → Pages. Until then this job fails and nothing else does.
+  site:
+    name: download page
+    needs: [verify, checksums]
+    if: always() && needs.checksums.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      # Job-level permissions replace the workflow's rather than adding to them,
+      # and everything unlisted becomes `none` — so `contents: read` has to be
+      # here or the checkout above it cannot read the repository.
+      contents: read
+      pages: write
+      # For the OIDC token deploy-pages exchanges to prove the deployment came
+      # from this workflow run.
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - uses: actions/configure-pages@v5
+
+      # One static directory, uploaded as it stands. There is no build step and
+      # deliberately no bundler: the page is a single file that fetches nothing.
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

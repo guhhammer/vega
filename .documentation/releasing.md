@@ -54,7 +54,7 @@ itself in a loop; without the call the tag would sit there with nothing built.
 One runner per platform, because Tauri links against the system webview and
 cannot cross-compile. Each runs the same bundle commands as `./make dist`.
 
-Every release carries four installers under names that never change between
+Every release carries five packages under names that never change between
 versions, so a download link written once keeps working:
 
 | Platform | File |
@@ -63,10 +63,38 @@ versions, so a download link written once keeps working:
 | Debian, Ubuntu | `Vega-linux-amd64.deb` |
 | macOS (Intel and Apple silicon) | `Vega-macos-universal.dmg` |
 | Windows | `Vega-windows-x86_64-setup.exe` |
+| Android 7 and later | `Vega-android-universal.apk` |
 
 Tauri's own version-stamped names (`Vega_1.0.0_amd64.deb`) are attached too —
 same bytes, and they are what the release page shows. `SHA256SUMS.txt` covers
-everything and is computed last, once all three platforms have uploaded.
+everything and is computed last, once every platform has uploaded.
+
+### Android
+
+A job of its own rather than a fifth entry in the build matrix: it shares
+nothing with the desktop builds beyond the source tree — no webview to link
+against, no Tauri bundler, a Gradle project generated at build time, and a
+signing step the others do not have. One APK carries all three phone
+architectures, so the release page has one Android row and nobody picks wrong.
+
+It **skips itself with a warning** when `ANDROID_KEYSTORE_BASE64` is not set,
+rather than failing the release. Android refuses to install an unsigned package
+outright, so publishing one would be worse than publishing none, and the four
+desktop builds are not the Android key's business. Key setup and the other
+secrets are in [android.md](android.md).
+
+There is no store listing and there is not going to be one; the reasoning is in
+the same file.
+
+### The download page
+
+`web/` is one static file, deployed to GitHub Pages by the last job. Every link
+on it goes through `/releases/latest/download/…`, which GitHub resolves against
+the newest *published* release — so a draft nobody published changes nothing,
+and the page is right the moment one is.
+
+It needs the repository's Pages source set to **GitHub Actions** once, under
+Settings → Pages. Until that is done this job is the only thing that fails.
 
 The release body is this version's CHANGELOG section, so the page says what
 changed rather than pointing at a file. A missing section is a warning, not a
