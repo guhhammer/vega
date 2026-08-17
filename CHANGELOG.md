@@ -24,6 +24,25 @@ each other.
   filesystem plugin, and no permission to read a path it was not handed. A
   received file shows its name, size, arrival progress, and a button that copies
   its path — Vega does not offer to open what a contact sent it.
+- **Images appear in the conversation**, and open full size inside the app when
+  clicked. What counts as an image is decided from the file's first bytes, never
+  from its name, and SVG is deliberately not on the list — it is a scriptable
+  document rather than a picture. Anything over 4 MB waits to be asked for
+  rather than loading itself. Nothing is handed to the operating system: the
+  bytes come through Rust, so the web view still has no filesystem access.
+- **Right-click menus.** On a contact: rename, copy account id, clear this chat.
+  On a message: copy its text, its file path, or the time it was sent.
+- **A reload button beside the name.** The interface is event-driven, but an
+  event can be missed and nothing on screen distinguishes "quiet" from "stale".
+- **Local names for contacts and for this device.** Both are stored here and
+  never sent: an account id is what identifies someone on the wire, and the
+  device label inside the sigchain is signed and cannot be edited after the
+  fact. Rename from the right-click menu or the pen beside either name.
+- **A stored-history screen**, listing every conversation with what it holds,
+  and clearing one or all of them. Clearing takes the messages and the files
+  that came with them.
+- **A note under your account id** that both ends must add each other before
+  either can send. It is the thing people get wrong first.
 - **Automatic tagging.** A version bump landing on `main` is now tagged and built
   into a draft release without anyone running a command. See
   [tag.yml](.github/workflows/tag.yml) and
@@ -37,6 +56,15 @@ each other.
   it. Text messages between the two versions are unaffected.
 - **CI checks that the three version files agree** on every push, rather than
   only when a release is being cut.
+- **The content security policy now allows `data:` images**, which is what lets
+  a received picture be displayed. It permits no scripts, no styles and no
+  network of any kind — `img-src 'self' data:` is the whole of the change.
+- **A new install calls itself "some device"** rather than "this device". The
+  label is only ever read next to others, and a list where every entry says
+  *this* device names nothing.
+- **The project is attributed to "The Vega contributors"** in the licence, the
+  crate metadata, the bundle publisher and the citation file, rather than to a
+  named individual.
 
 ### Known limitations
 

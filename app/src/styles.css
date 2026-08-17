@@ -140,10 +140,83 @@ button:focus-visible {
   gap: 0.35rem;
 }
 
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .brand h1 {
   font-size: 1.1rem;
   margin: 0;
   letter-spacing: 0.02em;
+}
+
+/* Square, quiet, and the same size wherever one appears: reload, rename, the
+   history button. They sit beside text rather than competing with it. */
+.icon {
+  flex: 0 0 auto;
+  width: 1.9rem;
+  height: 1.9rem;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  line-height: 1;
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.icon:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--surface-2);
+}
+
+.brand-row .reload {
+  margin-left: auto;
+}
+
+/* One turn per press, so a reload that finishes instantly still shows that it
+   happened. Motion is skipped for anyone who has asked for less of it. */
+.reload[data-busy="true"] {
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reload[data-busy="true"] {
+    animation: none;
+    opacity: 0.5;
+  }
+}
+
+/* The thing people get wrong often enough to be worth the space. */
+.hint {
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--ink-2);
+  border-left: 2px solid var(--accent);
+  padding-left: 0.5rem;
+}
+
+.device {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--ink-2);
+}
+
+.device-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .identity {
@@ -223,6 +296,93 @@ button:focus-visible {
 .sidebar footer button {
   flex: 1;
   font-size: 0.85rem;
+}
+
+/* The two named actions share the row; the icon takes only what it needs. */
+.sidebar footer .icon {
+  flex: 0 0 auto;
+  font-size: 0.9rem;
+}
+
+/* ---- right-click menu ---- */
+
+.menu {
+  position: fixed;
+  z-index: 20;
+  min-width: 12rem;
+  padding: 0.25rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  /* Lifted off the surface it covers, which is the only cue that it is a layer
+     rather than part of the panel underneath. */
+  box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+}
+
+.menu button {
+  background: transparent;
+  border: none;
+  border-radius: calc(var(--radius) - 4px);
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+.menu button:hover {
+  background: var(--surface-2);
+}
+
+button.danger,
+.menu button.danger {
+  color: var(--warn);
+}
+
+button.danger:hover:not(:disabled) {
+  border-color: var(--warn);
+}
+
+/* ---- stored history ---- */
+
+.history {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.history-row .name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-row .sub,
+.history .sub {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--ink-3);
+}
+
+.history-row .sub {
+  margin-left: auto;
+}
+
+.history-row button {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.75rem;
 }
 
 /* ---- chat ---- */
@@ -331,6 +491,53 @@ button:focus-visible {
   align-self: flex-start;
   font-size: 0.7rem;
   padding: 0.2rem 0.5rem;
+}
+
+/* The picture leads the bubble; the name and size become the caption under it.
+   Bounded in both directions so one photo cannot take the whole thread, and a
+   tall one cannot push everything else off the screen. */
+.file-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 18rem;
+  border-radius: calc(var(--radius) - 4px);
+  cursor: zoom-in;
+  /* Something to look at while a large one decodes, rather than a jump. */
+  background: var(--surface-2);
+}
+
+.file-image button {
+  font-size: 0.75rem;
+  padding: 0.3rem 0.6rem;
+}
+
+/* ---- full-size image viewer ---- */
+
+.viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
+  cursor: zoom-out;
+}
+
+.viewer img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--radius);
+  cursor: default;
+}
+
+.viewer-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
 }
 
 .composer {

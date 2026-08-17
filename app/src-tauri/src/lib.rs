@@ -43,6 +43,70 @@ fn file_path(root: &std::path::Path, transfer: &[u8; 32], name: &str) -> std::pa
         .join(vega_core::safe_file_name(name))
 }
 
+/// Delete everything a finished transfer left on disk.
+///
+/// Failure is logged rather than raised: the history it belonged to is already
+/// gone, and telling someone their chat could not be cleared because of a
+/// leftover directory would be both alarming and useless.
+fn remove_transfer_dir(root: &std::path::Path, transfer: &[u8; 32]) {
+    let dir = root.join(data_encoding::HEXLOWER.encode(transfer));
+    if let Err(e) = std::fs::remove_dir_all(&dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(error = %e, path = %dir.display(), "could not delete a file");
+        }
+    }
+}
+
+/// The image formats Vega will render, recognised by their first bytes.
+///
+/// The file name is never consulted. An extension is the sender's word, and
+/// deciding how to treat a file by what it claims to be is how a document ends
+/// up rendered as something it is not.
+///
+/// SVG is deliberately absent. It is a scriptable document rather than a bitmap,
+/// and there is no reason to accept one from a contact and hand it to a browser
+/// engine. The four here are all decoded by WebKit, WebView2 and WKWebView.
+fn image_mime(head: &[u8]) -> Option<&'static str> {
+    const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    if head.starts_with(PNG) {
+        return Some("image/png");
+    }
+    // Start of Image, then the first marker. Enough: every JPEG begins with it.
+    if head.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("image/jpeg");
+    }
+    if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    // RIFF container, four bytes of length, then the form type.
+    if head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
+}
+
+/// Peek at a file on disk and say whether it is an image worth showing.
+///
+/// Only the header is read, so listing a conversation full of files costs a
+/// handful of bytes each rather than the files themselves.
+fn sniff_image(path: &std::path::Path) -> Option<&'static str> {
+    use std::io::Read;
+    let mut head = [0u8; 16];
+    let mut file = std::fs::File::open(path).ok()?;
+    let read = file.read(&mut head).ok()?;
+    image_mime(&head[..read])
+}
+
+/// What this device calls itself: the local override if one was set, otherwise
+/// the label the identity was created with.
+fn device_label(rt: &Runtime) -> String {
+    rt.store
+        .device_label()
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| rt.identity.label.clone())
+}
+
 fn write_file(
     root: &std::path::Path,
     transfer: &[u8; 32],
@@ -93,10 +157,32 @@ pub struct FileView {
     size: u64,
     /// Where it is on disk, once all of it is. `None` while it is still coming.
     path: Option<String>,
+    /// The image type, if the bytes on disk are one Vega will render. `None`
+    /// for everything else, which the interface shows as a plain file.
+    image: Option<&'static str>,
     /// Chunks held out of chunks expected — the progress bar, and the reason
     /// this view is computed per read rather than stored with the message.
     have: u32,
     chunks: u32,
+    /// Names the file for [`read_image`]. Hex, because it crosses into JSON.
+    transfer: String,
+}
+
+/// An image handed to the web view, ready to drop into a `src`.
+#[derive(Debug, Serialize)]
+pub struct ImageData {
+    mime: &'static str,
+    /// The file, base64. Not a path: the web view has no filesystem access, and
+    /// this is what keeps it that way.
+    data: String,
+}
+
+/// One conversation, as the history screen lists it.
+#[derive(Debug, Serialize)]
+pub struct HistoryView {
+    account_id: String,
+    display_name: String,
+    messages: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -120,7 +206,7 @@ async fn me(ctx: State<'_, Ctx>) -> Result<MeView, String> {
     Ok(MeView {
         account_id: rt.identity.account_id.to_display(),
         short_id: rt.identity.account_id.short(),
-        device_label: rt.identity.label.clone(),
+        device_label: device_label(&rt),
         device_id: rt.identity.device_id.short(),
     })
 }
@@ -202,6 +288,151 @@ async fn send_file(
     Ok(())
 }
 
+/// Rename a contact, for this installation only.
+///
+/// The name a contact arrives with is the one they wrote in their own invite.
+/// This replaces it locally and tells nobody: the account id is what identifies
+/// them on the wire, and it does not change.
+#[tauri::command]
+async fn rename_contact(
+    account: String,
+    name: String,
+    ctx: State<'_, Ctx>,
+) -> Result<ContactView, String> {
+    let id = AccountId::from_display(&account).map_err(fail)?;
+    let rt = ctx.shared.lock().await;
+    let mut contact = rt
+        .store
+        .get_contact(&id)
+        .map_err(fail)?
+        .ok_or("no such contact")?;
+
+    // An empty name is allowed: it means "drop the name I gave them". The
+    // invite that carried their own name is not kept, so what the interface
+    // falls back to is their short id — which is at least true.
+    contact.display_name = name.trim().to_string();
+    rt.store.put_contact(&contact).map_err(fail)?;
+    Ok(view_of(&contact, &rt.identity.account_id))
+}
+
+/// Rename this device, for this installation only.
+///
+/// The label inside the sigchain is signed and cannot be edited after the fact.
+/// This is a local override; no contact ever learns it.
+#[tauri::command]
+async fn rename_device(name: String, ctx: State<'_, Ctx>) -> Result<String, String> {
+    let rt = ctx.shared.lock().await;
+    rt.store.set_device_label(name.trim()).map_err(fail)?;
+    Ok(device_label(&rt))
+}
+
+/// Delete one conversation's history, and any files that came with it.
+#[tauri::command]
+async fn clear_chat(with: String, ctx: State<'_, Ctx>) -> Result<usize, String> {
+    let account = AccountId::from_display(&with).map_err(fail)?;
+    let (removed, transfers) = {
+        let rt = ctx.shared.lock().await;
+        // Collected before the messages go, since the manifests are what name
+        // the files on disk.
+        let transfers: Vec<[u8; 32]> = rt
+            .store
+            .conversation(&account, usize::MAX)
+            .map_err(fail)?
+            .iter()
+            .filter_map(|m| m.content.file().map(|f| f.transfer))
+            .collect();
+        (
+            rt.store.clear_conversation(&account).map_err(fail)?,
+            transfers,
+        )
+    };
+
+    for transfer in transfers {
+        remove_transfer_dir(&ctx.files, &transfer);
+    }
+    Ok(removed)
+}
+
+/// Delete every conversation, and every file received or sent.
+#[tauri::command]
+async fn clear_all_history(ctx: State<'_, Ctx>) -> Result<usize, String> {
+    let removed = {
+        let rt = ctx.shared.lock().await;
+        rt.store.clear_all_messages().map_err(fail)?
+    };
+
+    // The whole directory rather than transfer by transfer: after this there is
+    // no message left that could name one, so anything still in there is
+    // unreachable by definition.
+    if let Err(e) = std::fs::remove_dir_all(ctx.files.as_path()) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(error = %e, "could not delete received files");
+        }
+    }
+    if let Err(e) = std::fs::create_dir_all(ctx.files.as_path()) {
+        tracing::warn!(error = %e, "could not recreate the files directory");
+    }
+    Ok(removed)
+}
+
+/// Read one received image back off disk, for the view to display.
+///
+/// Bytes rather than a path, because the web view is not allowed to read the
+/// filesystem and this is the point of that arrangement: it can ask for a file
+/// Vega already accepted, by the transfer id Vega gave it, and nothing else.
+/// `name` is re-sanitised on the way through `file_path`, so no combination of
+/// arguments can address anything outside a transfer's own directory.
+///
+/// The sniff is repeated here rather than trusted from the listing: this is the
+/// call that decides what a browser engine is asked to decode.
+#[tauri::command]
+async fn read_image(
+    transfer: String,
+    name: String,
+    ctx: State<'_, Ctx>,
+) -> Result<ImageData, String> {
+    let raw = data_encoding::HEXLOWER
+        .decode(transfer.as_bytes())
+        .map_err(|_| "not a transfer id".to_string())?;
+    let id: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| "not a transfer id".to_string())?;
+
+    let path = file_path(&ctx.files, &id, &name);
+    let bytes = std::fs::read(&path).map_err(|e| format!("that file is not readable: {e}"))?;
+
+    let mime = image_mime(&bytes).ok_or("that file is not an image Vega can show")?;
+    Ok(ImageData {
+        mime,
+        data: data_encoding::BASE64.encode(&bytes),
+    })
+}
+
+/// What each conversation holds, for the screen that offers to clear them.
+#[tauri::command]
+async fn history(ctx: State<'_, Ctx>) -> Result<Vec<HistoryView>, String> {
+    let rt = ctx.shared.lock().await;
+    let counts = rt.store.message_counts().map_err(fail)?;
+    Ok(counts
+        .into_iter()
+        .map(|(account, messages)| {
+            let name = rt
+                .store
+                .get_contact(&account)
+                .ok()
+                .flatten()
+                .map(|c| c.display_name)
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| account.short());
+            HistoryView {
+                account_id: account.to_display(),
+                display_name: name,
+                messages,
+            }
+        })
+        .collect())
+}
+
 #[tauri::command]
 async fn conversation(with: String, ctx: State<'_, Ctx>) -> Result<Vec<MessageView>, String> {
     let account = AccountId::from_display(&with).map_err(fail)?;
@@ -239,9 +470,13 @@ async fn conversation(with: String, ctx: State<'_, Ctx>) -> Result<Vec<MessageVi
                     Some(FileView {
                         name: info.name.to_string(),
                         size: info.size,
+                        // Decided from the bytes, not the name, and only once
+                        // the whole file is here — half a JPEG is not a picture.
+                        image: on_disk.then(|| sniff_image(&path)).flatten(),
                         path: on_disk.then(|| path.display().to_string()),
                         have,
                         chunks: info.chunks,
+                        transfer: data_encoding::HEXLOWER.encode(&info.transfer),
                     }),
                 ));
             }
@@ -390,11 +625,16 @@ fn read_seeds(path: &std::path::Path) -> Vec<vega_net::Multiaddr> {
         .collect()
 }
 
+/// The name this device starts life with, before anyone renames it.
+///
+/// "some device" rather than "this device": the label is only ever read next to
+/// others, and a list where every entry says *this* device names nothing. It is
+/// also a prompt — a name that obviously wants replacing gets replaced.
 fn hostname_label() -> String {
     std::env::var("HOSTNAME")
         .ok()
         .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "this device".to_string())
+        .unwrap_or_else(|| "some device".to_string())
 }
 
 /// Hand every queued envelope to the network.
@@ -698,9 +938,76 @@ pub fn run() {
             list_contacts,
             send_message,
             send_file,
+            read_image,
+            rename_contact,
+            rename_device,
+            clear_chat,
+            clear_all_history,
+            history,
             conversation,
             network,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Vega");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{image_mime, sniff_image};
+
+    #[test]
+    fn sniffing_reads_the_file_rather_than_the_name() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Named as a document, but the bytes are a PNG: shown as a picture.
+        let lying = dir.path().join("invoice.pdf");
+        std::fs::write(&lying, [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).unwrap();
+        assert_eq!(sniff_image(&lying), Some("image/png"));
+
+        // Named as a picture, but the bytes are a script: shown as a file.
+        let hostile = dir.path().join("photo.png");
+        std::fs::write(&hostile, b"#!/bin/sh\nrm -rf /").unwrap();
+        assert_eq!(sniff_image(&hostile), None);
+
+        // Shorter than any header, and a file that is not there at all.
+        let stub = dir.path().join("tiny");
+        std::fs::write(&stub, b"\x89P").unwrap();
+        assert_eq!(sniff_image(&stub), None);
+        assert_eq!(sniff_image(&dir.path().join("absent")), None);
+    }
+
+    #[test]
+    fn images_are_recognised_by_their_bytes() {
+        assert_eq!(
+            image_mime(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]),
+            Some("image/png")
+        );
+        assert_eq!(image_mime(&[0xff, 0xd8, 0xff, 0xe0]), Some("image/jpeg"));
+        assert_eq!(image_mime(b"GIF89a....."), Some("image/gif"));
+        assert_eq!(image_mime(b"RIFF\0\0\0\0WEBPVP8 "), Some("image/webp"));
+    }
+
+    #[test]
+    fn everything_else_is_a_plain_file() {
+        // A name is not evidence, so these are what matters: things that would
+        // like to be treated as an image and are not one.
+        assert_eq!(
+            image_mime(b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script/>"),
+            None,
+            "svg is a scriptable document, not a bitmap"
+        );
+        assert_eq!(image_mime(b"%PDF-1.7"), None);
+        assert_eq!(image_mime(b"#!/bin/sh\nrm -rf /"), None);
+        assert_eq!(
+            image_mime(b"RIFF\0\0\0\0WAVEfmt "),
+            None,
+            "the same container, but audio"
+        );
+        assert_eq!(image_mime(b""), None);
+        assert_eq!(
+            image_mime(&[0x89, b'P']),
+            None,
+            "a truncated header is not a match"
+        );
+    }
 }

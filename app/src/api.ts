@@ -22,8 +22,16 @@ export interface FileInfo {
   size: number;
   /** Where it is on disk, once all of it is. Null while it is still arriving. */
   path: string | null;
+  /**
+   * The image type, when the bytes on disk are one Vega will render — decided
+   * by Rust from the file's first bytes, never from its name. Null means show
+   * it as a plain file.
+   */
+  image: string | null;
   have: number;
   chunks: number;
+  /** Names the file for `readImage`. */
+  transfer: string;
 }
 
 export interface Message {
@@ -33,6 +41,13 @@ export interface Message {
   at: number;
   /** Set when this message is a file rather than text. */
   file: FileInfo | null;
+}
+
+/** One conversation as the history screen lists it. */
+export interface History {
+  account_id: string;
+  display_name: string;
+  messages: number;
 }
 
 /**
@@ -63,6 +78,32 @@ export const api = {
   conversation: (that: string) =>
     invoke<Message[]>("conversation", { with: that }),
   network: () => invoke<Network>("network"),
+
+  /**
+   * A received image, as a `data:` URL ready for an `<img src>`.
+   *
+   * The bytes come through Rust rather than the page reading the file, which is
+   * what keeps the app's capability list empty — the web view has no filesystem
+   * access at all, and asking for it would be a much larger grant than showing
+   * one picture is worth.
+   */
+  readImage: async (transfer: string, name: string) => {
+    const img = await invoke<{ mime: string; data: string }>("read_image", {
+      transfer,
+      name,
+    });
+    return `data:${img.mime};base64,${img.data}`;
+  },
+
+  /** Local only. The account id identifies them on the wire, and it never changes. */
+  renameContact: (account: string, name: string) =>
+    invoke<Contact>("rename_contact", { account, name }),
+  /** Local only. Nothing on the wire carries this. */
+  renameDevice: (name: string) => invoke<string>("rename_device", { name }),
+
+  clearChat: (that: string) => invoke<number>("clear_chat", { with: that }),
+  clearAllHistory: () => invoke<number>("clear_all_history"),
+  history: () => invoke<History[]>("history"),
 };
 
 /**

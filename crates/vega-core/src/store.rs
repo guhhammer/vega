@@ -387,7 +387,9 @@ impl Store {
             };
             out.push((account, seqs.count()));
         }
-        out.sort_by(|a, b| b.1.cmp(&a.1));
+        // Busiest first: the conversation someone wants to clear is usually the
+        // one with the most in it.
+        out.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
         Ok(out)
     }
 
@@ -1156,6 +1158,113 @@ mod tests {
         assert_eq!(store.pending().unwrap().len(), 1);
         store.dequeue(item.seq).unwrap();
         assert!(store.pending().unwrap().is_empty());
+    }
+
+    /// One stored message in a conversation, with `id` deciding its identity so
+    /// a test can write several without them deduplicating each other away.
+    fn message_in(store: &Store, conversation: AccountId, id: u8) -> StoredMessage {
+        let mut content = Content::new(conversation, NOW, 0, Body::Text { text: "hi".into() });
+        content.id = [id; 32];
+        StoredMessage {
+            seq: store.next_message_seq().unwrap(),
+            conversation,
+            from_account: conversation,
+            from_device: DeviceId([1u8; 32]),
+            outgoing: false,
+            received_at: NOW,
+            content,
+        }
+    }
+
+    #[test]
+    fn clearing_one_conversation_leaves_the_others_alone() {
+        let (store, _dir) = store();
+        let alice = AccountId([1u8; 32]);
+        let bob = AccountId([2u8; 32]);
+
+        for id in 0..3 {
+            store
+                .append_message(&message_in(&store, alice, id))
+                .unwrap();
+        }
+        store.append_message(&message_in(&store, bob, 200)).unwrap();
+
+        // A file filed under alice goes with her history; bob's transfer stays.
+        let data = vec![4u8; 64];
+        let mut hers = transfer_of(&data);
+        hers.conversation = alice;
+        store.begin_transfer(&hers).unwrap();
+        let mut his = transfer_of(&data);
+        his.transfer = [6u8; 32];
+        his.conversation = bob;
+        store.begin_transfer(&his).unwrap();
+
+        assert_eq!(store.clear_conversation(&alice).unwrap(), 3);
+        assert!(store.conversation(&alice, 100).unwrap().is_empty());
+        assert_eq!(store.conversation(&bob, 100).unwrap().len(), 1);
+        assert!(store.get_transfer(&hers.transfer).unwrap().is_none());
+        assert!(store.get_transfer(&his.transfer).unwrap().is_some());
+
+        // Clearing a conversation that has nothing in it is not an error.
+        assert_eq!(store.clear_conversation(&alice).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_cleared_conversation_cannot_be_refilled_by_a_replay() {
+        let (store, _dir) = store();
+        let alice = AccountId([1u8; 32]);
+        let msg = message_in(&store, alice, 42);
+
+        store.append_message(&msg).unwrap();
+        store.clear_conversation(&alice).unwrap();
+
+        // The same ciphertext, still parked in a mailbox somewhere, arrives
+        // again. Deleting history is not consent to receive it a second time.
+        assert!(
+            !store.append_message(&msg).unwrap(),
+            "a replayed message must not resurrect a cleared conversation"
+        );
+        assert!(store.conversation(&alice, 100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn clearing_everything_empties_every_conversation() {
+        let (store, _dir) = store();
+        let alice = AccountId([1u8; 32]);
+        let bob = AccountId([2u8; 32]);
+        store.append_message(&message_in(&store, alice, 1)).unwrap();
+        store.append_message(&message_in(&store, alice, 2)).unwrap();
+        store.append_message(&message_in(&store, bob, 3)).unwrap();
+        store.begin_transfer(&transfer_of(&[7u8; 32])).unwrap();
+
+        assert_eq!(store.message_counts().unwrap(), vec![(alice, 2), (bob, 1)]);
+        assert_eq!(store.clear_all_messages().unwrap(), 3);
+
+        assert!(store.message_counts().unwrap().is_empty());
+        assert!(store.conversation(&alice, 100).unwrap().is_empty());
+        assert!(store.conversation(&bob, 100).unwrap().is_empty());
+        assert!(store.get_transfer(&[5u8; 32]).unwrap().is_none());
+
+        // Contacts are not history: clearing the thread must not lose the
+        // person it was with.
+        assert_eq!(store.clear_all_messages().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_local_device_label_overrides_nothing_else() {
+        let (store, _dir) = store();
+        assert!(store.device_label().unwrap().is_none());
+
+        store.set_device_label("kitchen laptop 🍳").unwrap();
+        assert_eq!(
+            store.device_label().unwrap().as_deref(),
+            Some("kitchen laptop 🍳")
+        );
+
+        // Blank is the same as unset, so clearing the field falls back to the
+        // name the identity was created with rather than showing nothing.
+        store.set_device_label("   ").unwrap();
+        assert!(store.device_label().unwrap().is_none());
     }
 
     #[test]
