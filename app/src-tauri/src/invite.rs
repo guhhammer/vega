@@ -114,6 +114,37 @@ impl Invite {
             .collect::<Vec<_>>()
             .join(" ")
     }
+
+    /// One account's own fingerprint, as words — what somebody reads out while
+    /// sending an invite.
+    ///
+    /// [`Self::safety_words`] needs both ids, so it cannot be shown until the
+    /// two people already have each other. That is one step too late to catch
+    /// an invite that was swapped on the way: by then the substitution is the
+    /// conversation. This is the same idea applied to a single account. The
+    /// sender reads these ten words aloud, the receiver sees the ten words
+    /// computed from the invite that actually arrived, and anything swapped in
+    /// transit is a different phrase before a single message has been sent.
+    ///
+    /// Ten words over the id cover the whole invite rather than just the id.
+    /// An account id is `blake3(domain ‖ account key)`, the sigchain is signed
+    /// by that key, and [`Self::decode`] refuses an invite whose chain, contact
+    /// key or device roster do not match the id it claims — so pinning the id
+    /// pins everything that travels with it.
+    ///
+    /// A domain tag of its own, so an identity phrase and a safety phrase can
+    /// never come out identical and be mistaken for each other.
+    pub fn identity_words(account: &AccountId) -> String {
+        let mut h = blake3::Hasher::new();
+        h.update(b"vega:identity-words:v1");
+        h.update(account.as_bytes());
+
+        h.finalize().as_bytes()[..10]
+            .iter()
+            .map(|byte| crate::words::WORDS[*byte as usize])
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 #[cfg(test)]
@@ -214,6 +245,43 @@ mod tests {
         assert_eq!(
             Invite::safety_number(&a, &b) == Invite::safety_number(&a, &c),
             Invite::safety_words(&a, &b) == Invite::safety_words(&a, &c)
+        );
+    }
+
+    #[test]
+    fn an_account_reads_out_as_its_own_phrase() {
+        let a = bootstrap_account("a").unwrap().0.account_id;
+        let b = bootstrap_account("b").unwrap().0.account_id;
+
+        // One id, one phrase, every time — otherwise the sender and the
+        // receiver would be comparing two different readings of the same thing.
+        assert_eq!(Invite::identity_words(&a), Invite::identity_words(&a));
+        assert_ne!(Invite::identity_words(&a), Invite::identity_words(&b));
+        assert_eq!(Invite::identity_words(&a).split(' ').count(), 10);
+
+        for word in Invite::identity_words(&a).split(' ') {
+            assert!(
+                crate::words::WORDS.contains(&word),
+                "{word} is not on the list"
+            );
+        }
+
+        // Two different checks with two different domain tags. An identity
+        // phrase compared against a safety phrase must not be able to match by
+        // construction, or somebody comparing the wrong pair would be reassured
+        // by nothing at all.
+        assert_ne!(Invite::identity_words(&a), Invite::safety_words(&a, &a));
+    }
+
+    /// The phrase has to survive the trip an invite actually makes, since it is
+    /// what says the trip was clean.
+    #[test]
+    fn the_phrase_follows_the_invite_through_encoding() {
+        let i = invite();
+        let decoded = Invite::decode(&i.encode().unwrap()).unwrap();
+        assert_eq!(
+            Invite::identity_words(&decoded.account_id),
+            Invite::identity_words(&i.account_id)
         );
     }
 }

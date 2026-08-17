@@ -16,9 +16,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Vega ships a messenger, not a library: a warning in crypto or transport code
-  # is a defect until someone has looked at it.
-  RUSTFLAGS: -D warnings
 
 jobs:
   # The workspace Cargo.toml is the version every artifact is named after, and
@@ -76,7 +73,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets
+
+      # `-D warnings` is passed to clippy rather than set in RUSTFLAGS, because
+      # RUSTFLAGS applies to every crate cargo builds — several hundred
+      # dependencies included — and a warning in somebody else's release is not
+      # a defect in this one. Clippy runs the rustc lints too, so nothing is
+      # lost: a warning in Vega's own crypto or transport code is still fatal.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       # The integration tests bind loopback sockets and wait on real handshakes,
       # so they need a moment more patience than a unit test run.
       - run: cargo test --workspace

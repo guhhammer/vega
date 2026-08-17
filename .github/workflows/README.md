@@ -1,10 +1,11 @@
 # Workflows
 
+Three, and no more. Each one answers a different question, and a workflow that
+does not answer a question nobody else does should not exist.
+
 | Workflow | Runs on | Does |
 |---|---|---|
 | [`ci.yml`](ci.yml) | push to `main`, every PR | fmt, clippy, tests, frontend build |
-| [`audit.yml`](audit.yml) | dependency changes, weekly | RustSec and npm advisories |
-| [`nightly.yml`](nightly.yml) | nightly, manual | Android cross-compile, docs, release-profile build |
 | [`tag.yml`](tag.yml) | push to `main`, manual | Tags a commit that bumps the version, then calls `release.yml` |
 | [`release.yml`](release.yml) | `v*` tags, `tag.yml`, manual | Installers for Linux, macOS and Windows on a draft release, plus checksums |
 
@@ -16,14 +17,6 @@ pre-commit check actually gets used. Nothing slow belongs here. The one thing it
 adds is a seconds-long `version` job, so that the three files carrying the
 version disagreeing is a red run on the commit that caused it rather than a
 surprise at the moment someone is trying to cut a release.
-
-**`audit.yml` runs on a clock as well as on change.** An advisory published on a
-Tuesday should not wait for the next unrelated commit to be noticed. That is the
-whole reason it is not folded into `ci.yml`.
-
-**`nightly.yml` holds everything worth knowing but not worth blocking a PR
-for.** An Android cross-compile takes minutes and breaks for reasons unrelated
-to the change in front of you; finding out the next morning is soon enough.
 
 **`tag.yml` exists so that releasing is a version bump rather than a
 command.** It runs on every push to `main` and does nothing at all unless the
@@ -49,18 +42,24 @@ cover files that have finished uploading. See
 
 ## Conventions
 
-- **Warnings are denied.** `RUSTFLAGS: -D warnings` in `ci.yml`. A warning in
-  crypto or transport code is a defect until someone has looked at it.
+- **Warnings are denied**, by `cargo clippy … -- -D warnings` rather than by
+  `RUSTFLAGS`. The flag variable applies to every crate cargo builds, several
+  hundred dependencies included, and a warning in somebody else's release is
+  not a defect in this one. Clippy runs the rustc lints as well, so the
+  coverage is the same where it matters.
 - **The toolchain is pinned** by `rust-toolchain.toml`, so the dependency cache
   is not invalidated every six weeks by a new stable release.
-- **`Swatinem/rust-cache`** everywhere. libp2p is several hundred crates and an
-  uncached job is roughly ten times an incremental one.
+- **`Swatinem/rust-cache` in `ci.yml`, and nowhere else.** libp2p is several
+  hundred crates and an uncached job is roughly ten times an incremental one —
+  which is worth it on the workflow that runs constantly, and not worth it on
+  the one that decides what ships.
 - **Least privilege.** Jobs declare `permissions: contents: read` unless they
   genuinely need to write.
 
 ## Adding one
 
-Ask which of the existing buckets it belongs in before adding another file. If
-it must pass before a merge it goes in `ci.yml`; if it is informational it goes
-in `nightly.yml`. A separate file is for something with a genuinely different
-trigger, not for something with a different name.
+Ask whether it belongs in `ci.yml` first. If it must pass before a merge, that
+is where it goes. A separate file is for something with a genuinely different
+trigger, not for something with a different name — and a fourth workflow needs
+to earn its place against the three above, which between them cover *is this
+correct*, *is this a release*, and *build the release*.

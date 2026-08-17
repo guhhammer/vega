@@ -285,11 +285,11 @@ jobs:
         if: runner.os == 'macOS'
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-      # Deliberately no Swatinem/rust-cache here, unlike ci.yml and nightly.yml.
-      # What ships should be built from source on a clean machine rather than
-      # assembled partly from whatever a previous job happened to leave behind.
-      # Releases are rare and this costs one cold build per platform; the two
-      # workflows that run constantly are the ones where caching earns its keep.
+      # Deliberately no Swatinem/rust-cache here, unlike ci.yml. What ships
+      # should be built from source on a clean machine rather than assembled
+      # partly from whatever a previous job happened to leave behind. Releases
+      # are rare and this costs one cold build per platform; ci.yml is the
+      # workflow that runs constantly and where caching earns its keep.
 
       - uses: actions/setup-node@v4
         with:

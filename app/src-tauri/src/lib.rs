@@ -168,6 +168,10 @@ pub struct MeView {
     short_id: String,
     device_label: String,
     device_id: String,
+    /// This account's own fingerprint as words, to read out while handing an
+    /// invite over. Fifty-two characters of base32 is not something anyone says
+    /// down a phone line, and an id nobody checks is an id anybody can swap.
+    identity_words: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -180,6 +184,18 @@ pub struct ContactView {
     /// The same fingerprint as words. Easier to read to somebody than digits,
     /// and the check people actually perform is the one they will do.
     safety_words: String,
+    /// Their own phrase, independent of ours — the one they read out when they
+    /// sent the invite. Kept so it can still be compared after the fact.
+    identity_words: String,
+}
+
+/// What an invite claims, before anything is saved.
+#[derive(Debug, Serialize)]
+pub struct InvitePreviewView {
+    account_id: String,
+    short_id: String,
+    display_name: String,
+    identity_words: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -251,6 +267,7 @@ async fn me(ctx: State<'_, Ctx>) -> Result<MeView, String> {
         short_id: rt.identity.account_id.short(),
         device_label: device_label(&rt),
         device_id: rt.identity.device_id.short(),
+        identity_words: invite::Invite::identity_words(&rt.identity.account_id),
     })
 }
 
@@ -258,6 +275,29 @@ async fn me(ctx: State<'_, Ctx>) -> Result<MeView, String> {
 async fn my_invite(display_name: String, ctx: State<'_, Ctx>) -> Result<String, String> {
     let rt = ctx.shared.lock().await;
     rt.my_invite(&display_name).map_err(fail)
+}
+
+/// Say who an invite claims to be, without saving anything.
+///
+/// This exists for the phrase. Whoever sent the invite read ten words out; this
+/// is where the receiver sees the ten words computed from what actually
+/// arrived, and reads them back before pressing Add. Two phrases that differ
+/// mean the invite was swapped on the way, which is the one attack a manual
+/// exchange has to be able to catch.
+///
+/// Nothing here is taken on trust: `decode` verifies the sigchain and refuses
+/// an invite whose account id, contact key or device roster disagree with it,
+/// exactly as it does for `add_contact`. A preview that cannot be decoded is an
+/// error, so a malformed invite is refused here rather than after it is saved.
+#[tauri::command]
+async fn preview_invite(invite: String) -> Result<InvitePreviewView, String> {
+    let decoded = invite::Invite::decode(&invite).map_err(fail)?;
+    Ok(InvitePreviewView {
+        account_id: decoded.account_id.to_display(),
+        short_id: decoded.account_id.short(),
+        display_name: decoded.display_name,
+        identity_words: invite::Invite::identity_words(&decoded.account_id),
+    })
 }
 
 #[tauri::command]
@@ -354,6 +394,35 @@ async fn rename_contact(
     // invite that carried their own name is not kept, so what the interface
     // falls back to is their short id — which is at least true.
     contact.display_name = name.trim().to_string();
+    rt.store.put_contact(&contact).map_err(fail)?;
+    Ok(view_of(&contact, &rt.identity.account_id))
+}
+
+/// Record that the safety words were compared, and how it went.
+///
+/// The comparison itself happens on a call or across a table — no program can
+/// do it, and no program should claim to. All this does is remember the answer,
+/// so the interface can stop asking a question that has been settled and say
+/// plainly which conversations have been checked and which have not.
+///
+/// Reversible on purpose. A contact who adds a new device, or a phrase that
+/// turns out to have been compared carelessly, should be able to go back to
+/// unverified rather than leave a reassuring mark nobody earned.
+#[tauri::command]
+async fn set_verified(
+    account: String,
+    verified: bool,
+    ctx: State<'_, Ctx>,
+) -> Result<ContactView, String> {
+    let id = AccountId::from_display(&account).map_err(fail)?;
+    let rt = ctx.shared.lock().await;
+    let mut contact = rt
+        .store
+        .get_contact(&id)
+        .map_err(fail)?
+        .ok_or("no such contact")?;
+
+    contact.verified = verified;
     rt.store.put_contact(&contact).map_err(fail)?;
     Ok(view_of(&contact, &rt.identity.account_id))
 }
@@ -601,6 +670,7 @@ fn view_of(c: &vega_core::Contact, me: &AccountId) -> ContactView {
         verified: c.verified,
         safety_number: invite::Invite::safety_number(me, &c.account_id),
         safety_words: invite::Invite::safety_words(me, &c.account_id),
+        identity_words: invite::Invite::identity_words(&c.account_id),
     }
 }
 
@@ -1032,6 +1102,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             me,
             my_invite,
+            preview_invite,
             add_contact,
             list_contacts,
             send_message,
@@ -1040,6 +1111,7 @@ pub fn run() {
             export_file,
             rename_contact,
             rename_device,
+            set_verified,
             clear_chat,
             clear_all_history,
             history,

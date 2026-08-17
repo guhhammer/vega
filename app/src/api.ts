@@ -7,6 +7,12 @@ export interface Me {
   short_id: string;
   device_label: string;
   device_id: string;
+  /**
+   * Your own fingerprint as ten words, to read out while handing an invite
+   * over. Fifty-two characters of base32 is not something anybody says down a
+   * phone line, and an id nobody checks is an id anybody can swap.
+   */
+  identity_words: string;
 }
 
 export interface Contact {
@@ -17,6 +23,23 @@ export interface Contact {
   safety_number: string;
   /** The same fingerprint as words, for reading aloud instead of the digits. */
   safety_words: string;
+  /**
+   * Their own phrase, independent of yours — the one they read out when they
+   * sent the invite, kept so it can still be compared after the fact.
+   */
+  identity_words: string;
+}
+
+/** What an invite claims to be, before anything has been saved. */
+export interface InvitePreview {
+  account_id: string;
+  short_id: string;
+  display_name: string;
+  /**
+   * Computed from the invite that actually arrived. Read it back to whoever
+   * sent it: a phrase that differs from theirs means it was swapped in transit.
+   */
+  identity_words: string;
 }
 
 export interface FileInfo {
@@ -74,6 +97,13 @@ export const api = {
   me: () => invoke<Me>("me"),
   myInvite: (displayName: string) =>
     invoke<string>("my_invite", { displayName }),
+  /**
+   * Who an invite says it is, without saving it. Verified exactly as
+   * `addContact` verifies it, so a preview that comes back is a real invite —
+   * this only stops short of keeping it.
+   */
+  previewInvite: (invite: string) =>
+    invoke<InvitePreview>("preview_invite", { invite }),
   addContact: (invite: string) => invoke<Contact>("add_contact", { invite }),
   listContacts: () => invoke<Contact[]>("list_contacts"),
   sendMessage: (to: string, text: string) =>
@@ -113,6 +143,14 @@ export const api = {
     invoke<Contact>("rename_contact", { account, name }),
   /** Local only. Nothing on the wire carries this. */
   renameDevice: (name: string) => invoke<string>("rename_device", { name }),
+
+  /**
+   * Remember that the safety words were compared, and how it went. The
+   * comparison happens on a call or in person; this only records the answer,
+   * and it can be taken back.
+   */
+  setVerified: (account: string, verified: boolean) =>
+    invoke<Contact>("set_verified", { account, verified }),
 
   clearChat: (that: string) => invoke<number>("clear_chat", { with: that }),
   clearAllHistory: () => invoke<number>("clear_all_history"),
