@@ -153,7 +153,7 @@ outright.
 | End-to-end confidentiality | vodozemac Olm session, per recipient *device* |
 | Forward secrecy | Double Ratchet — a stolen device does not decrypt history |
 | Post-compromise security | Ratchet self-heals after key compromise once a fresh DH lands |
-| Groups | Megolm session per group, rotated on membership change |
+| Groups | Pairwise fan-out — one sealed message per member device, over the same Olm ratchet |
 | Replay | Ratchet message index + persisted seen-set per session |
 | Sender anonymity to relays | Sealed sender — the outer envelope carries only a routing tag |
 
@@ -378,7 +378,7 @@ layer.
 | **P4** | **T3 — relay.** Circuit Relay v2, reservation management, relay selection and scoring, opt-in relaying with a bandwidth budget. | A phone on 4G behind carrier NAT reaches a peer it cannot hole-punch to. |
 | **P5** | **Android.** Tauri mobile build, foreground service plugin, multicast lock, battery behaviour, mobile-shaped UI. | A message sent while the phone is in a pocket arrives. |
 | **P6** | **T4 — mailboxes.** Store-and-forward protocol, admission control, replication, TTL, collection and acknowledgement. | A message sent to a device that is switched off arrives when it comes back. |
-| **P7** | **Groups, then T5.** Megolm groups with rotation on membership change. Then, if it still looks worth it, offline mesh transports. | The design holds beyond one-to-one. |
+| **P7** | **Groups, then T5.** Groups are done, by pairwise fan-out — see the note on Megolm below. T5 offline mesh is not started and needs a custom transport plus a native plugin per platform. | The design holds beyond one-to-one. |
 
 P1 through P3 are where the risk actually lives. If P3 works reliably, the rest is
 engineering rather than uncertainty.
@@ -399,9 +399,17 @@ engineering rather than uncertainty.
 4. **Does an account survive losing every device?** If yes, that implies a
    recovery phrase, and a recovery phrase is an attack surface. Signal chose no.
    Worth choosing consciously.
-5. **Groups: Megolm or MLS?** Megolm is proven and pairs with the vodozemac
-   choice. MLS (openmls) is the modern answer with better properties at larger
-   sizes. Only matters at P7.
+5. ~~**Groups: Megolm or MLS?**~~ **Settled: neither, for now.** Both assume a
+   delivery service that accepts one ciphertext and fans it out. Vega has none:
+   every envelope is sealed to one device and routed on a *pairwise* tag, so a
+   group message is N envelopes whatever is inside them. Megolm would have
+   changed the payload without changing the count, at the cost of session-key
+   distribution, rotation on membership change, and weaker forward secrecy than
+   the Olm ratchet already gives. So groups fan out pairwise. Megolm becomes
+   worth its keep only alongside a **group-addressed envelope** — one shared
+   routing tag and seal key for the whole group — which is a genuine N× saving
+   and a genuine metadata cost, since a relay could then link every member's
+   traffic by that shared tag. That is the decision to revisit, not the cipher.
 6. **The `include_str!` per-company idea from the prototype notes.** Compiling a
    config into each build is a real distribution property, but it is not a
    security boundary — anyone can extract a constant from a binary. Worth

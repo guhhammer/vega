@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/vega-core", "crates/vega-net", "app/src-tauri"]
+members = ["crates/vega-core", "crates/vega-net", "crates/vega-android", "app/src-tauri"]
 resolver = "2"
 
 [workspace.package]
@@ -30,6 +30,10 @@ cast_possible_truncation = "warn"
 [workspace.dependencies]
 vega-core = { path = "crates/vega-core" }
 vega-net = { path = "crates/vega-net" }
+# Compiled everywhere, does nothing off Android. Building it on the desktop is
+# what keeps its call sites type-checked by `./make check`, which is the only
+# check that runs on a machine without an NDK.
+vega-android = { path = "crates/vega-android" }
 
 # crypto
 vodozemac = "0.10"

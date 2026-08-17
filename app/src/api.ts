@@ -75,10 +75,56 @@ export interface Message {
 
 /** One conversation as the history screen lists it. */
 export interface History {
+  /** A thread key: a contact's account id, or `group:<id>`. */
   account_id: string;
   display_name: string;
+  /** True when this is a group rather than a contact. */
+  group: boolean;
   messages: number;
 }
+
+/** One member of a group. */
+export interface GroupMember {
+  account_id: string;
+  display_name: string;
+  /** This is you. */
+  self_: boolean;
+  /**
+   * Not one of your contacts, so you cannot send to them and they will not see
+   * what you write. Whoever made the group knows them; you do not. Shown rather
+   * than hidden — a member list that quietly leaves people out is a lie about
+   * who is reading.
+   */
+  unreachable: boolean;
+}
+
+/**
+ * A group.
+ *
+ * `id` is the thread key, in the same form every thread call takes, so a group
+ * and a contact are interchangeable everywhere a conversation is named.
+ */
+export interface Group {
+  id: string;
+  name: string;
+  /** The one account that may change the membership. */
+  creator: string;
+  /** That creator is you — everyone else can only leave. */
+  mine: boolean;
+  members: GroupMember[];
+  /** You are no longer in it. The thread stays readable and stops sending. */
+  departed: boolean;
+  unread: number;
+}
+
+/**
+ * The most people a group holds.
+ *
+ * Mirrors `MAX_GROUP_MEMBERS` in vega-core, which is the side that enforces it.
+ * Every message is sent once per member device, so this is a bound on how much
+ * traffic one message can turn into.
+ */
+export const MAX_GROUP_MEMBERS = 32;
 
 /**
  * The largest file Vega will send.
@@ -160,6 +206,33 @@ export const api = {
    */
   setVerified: (account: string, verified: boolean) =>
     invoke<Contact>("set_verified", { account, verified }),
+
+  /**
+   * Start a group.
+   *
+   * Everybody named has to be a contact already: there is no directory to look
+   * anyone up in, and a group is not a way around exchanging invites. They are
+   * all told immediately, which is also how they learn they are in it — there
+   * is no invitation to accept, for the same reason there is no server to hold
+   * one.
+   */
+  createGroup: (name: string, members: string[]) =>
+    invoke<Group>("create_group", { name, members }),
+  listGroups: () => invoke<Group[]>("list_groups"),
+  /** Returns the members it could not be delivered to, if any. */
+  sendGroupMessage: (group: string, text: string) =>
+    invoke<string[]>("send_group_message", { group, text }),
+  /** Creator only. Everyone else is refused by the Rust side. */
+  addToGroup: (group: string, account: string) =>
+    invoke<Group>("add_to_group", { group, account }),
+  removeFromGroup: (group: string, account: string) =>
+    invoke<Group>("remove_from_group", { group, account }),
+  renameGroup: (group: string, name: string) =>
+    invoke<Group>("rename_group", { group, name }),
+  /** Tells the others on the way out. The thread stays. */
+  leaveGroup: (group: string) => invoke<Group>("leave_group", { group }),
+  /** Local. The others keep their copy, and nothing tells them. */
+  deleteGroup: (group: string) => invoke<number>("delete_group", { group }),
 
   clearChat: (that: string) => invoke<number>("clear_chat", { with: that }),
   clearAllHistory: () => invoke<number>("clear_all_history"),

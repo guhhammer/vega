@@ -238,11 +238,44 @@ pub struct ImageData {
     data: String,
 }
 
+/// A group, as the interface lists it.
+#[derive(Debug, Serialize)]
+pub struct GroupView {
+    /// The thread key — `group:<id>` — the same string every thread command takes.
+    id: String,
+    name: String,
+    /// Who may change the membership. Everyone else may only leave.
+    creator: String,
+    /// True when that creator is me, which is what the interface uses to decide
+    /// whether to offer the buttons at all.
+    mine: bool,
+    members: Vec<GroupMemberView>,
+    /// We are no longer in it. The thread stays readable and stops accepting.
+    departed: bool,
+    unread: usize,
+}
+
+/// One member of a group.
+#[derive(Debug, Serialize)]
+pub struct GroupMemberView {
+    account_id: String,
+    display_name: String,
+    /// This is me.
+    self_: bool,
+    /// Not in my contacts, so I cannot send to them and they see nothing I
+    /// write. The creator knows them; I do not. Shown rather than hidden,
+    /// because a member list that quietly omits people is a lie about who is
+    /// reading.
+    unreachable: bool,
+}
+
 /// One conversation, as the history screen lists it.
 #[derive(Debug, Serialize)]
 pub struct HistoryView {
+    /// The thread key: a contact's account id, or `group:<id>`.
     account_id: String,
     display_name: String,
+    group: bool,
     messages: usize,
 }
 
@@ -412,26 +445,39 @@ async fn rename_contact(
 /// can settle the badge without a second round trip.
 #[tauri::command]
 async fn mark_read(with: String, ctx: State<'_, Ctx>) -> Result<usize, String> {
-    let account = AccountId::from_display(&with).map_err(fail)?;
+    let which = thread_of(&with)?;
     let rt = ctx.shared.lock().await;
 
-    let Some(mut contact) = rt.store.get_contact(&account).map_err(fail)? else {
-        // A conversation with somebody already deleted. Nothing to mark, and
-        // nothing worth interrupting the interface over.
-        return Ok(0);
+    // Never backwards: a marker that moved down would resurrect messages that
+    // have been read, and `last_seq` is zero for a thread with no history.
+    let last = rt.store.last_seq(&which).map_err(fail)?;
+
+    let read_seq = match which {
+        vega_core::Conversation::Direct(account) => {
+            let Some(mut contact) = rt.store.get_contact(&account).map_err(fail)? else {
+                // A conversation with somebody already deleted. Nothing to
+                // mark, and nothing worth interrupting the interface over.
+                return Ok(0);
+            };
+            if last > contact.read_seq {
+                contact.read_seq = last;
+                rt.store.put_contact(&contact).map_err(fail)?;
+            }
+            contact.read_seq
+        }
+        vega_core::Conversation::Group(id) => {
+            let Some(mut group) = rt.store.get_group(&id).map_err(fail)? else {
+                return Ok(0);
+            };
+            if last > group.read_seq {
+                group.read_seq = last;
+                rt.store.put_group(&group).map_err(fail)?;
+            }
+            group.read_seq
+        }
     };
 
-    let last = rt.store.last_seq(&account).map_err(fail)?;
-    // Never backwards: a marker that moved down would resurrect messages that
-    // have been read, and `last_seq` is zero for a conversation with no history.
-    if last > contact.read_seq {
-        contact.read_seq = last;
-        rt.store.put_contact(&contact).map_err(fail)?;
-    }
-    Ok(rt
-        .store
-        .unread(&account, contact.read_seq)
-        .unwrap_or_default())
+    Ok(rt.store.unread(&which, read_seq).unwrap_or_default())
 }
 
 /// Record that the safety words were compared, and how it went.
@@ -477,20 +523,20 @@ async fn rename_device(name: String, ctx: State<'_, Ctx>) -> Result<String, Stri
 /// Delete one conversation's history, and any files that came with it.
 #[tauri::command]
 async fn clear_chat(with: String, ctx: State<'_, Ctx>) -> Result<usize, String> {
-    let account = AccountId::from_display(&with).map_err(fail)?;
+    let which = thread_of(&with)?;
     let (removed, transfers) = {
         let rt = ctx.shared.lock().await;
         // Collected before the messages go, since the manifests are what name
         // the files on disk.
         let transfers: Vec<[u8; 32]> = rt
             .store
-            .conversation(&account, usize::MAX)
+            .conversation(&which, usize::MAX)
             .map_err(fail)?
             .iter()
             .filter_map(|m| m.content.file().map(|f| f.transfer))
             .collect();
         (
-            rt.store.clear_conversation(&account).map_err(fail)?,
+            rt.store.clear_conversation(&which).map_err(fail)?,
             transfers,
         )
     };
@@ -599,6 +645,41 @@ async fn export_file(
     Ok(path.display().to_string())
 }
 
+/// Prefix marking a group in the one string the interface uses to name a thread.
+///
+/// The interface has exactly one notion of "which thread is open", and it is
+/// this string. An account's display form is base32 with dashes and can never
+/// begin with it, so the two spaces do not overlap.
+const THREAD_GROUP_PREFIX: &str = "group:";
+
+/// The string the interface uses to name a thread.
+fn thread_key(which: &vega_core::Conversation) -> String {
+    match which {
+        vega_core::Conversation::Direct(account) => account.to_display(),
+        vega_core::Conversation::Group(group) => {
+            format!("{THREAD_GROUP_PREFIX}{}", group.to_display())
+        }
+    }
+}
+
+/// Parse one back. Anything unparseable is the interface's bug, not a peer's.
+fn thread_of(key: &str) -> Result<vega_core::Conversation, String> {
+    match key.strip_prefix(THREAD_GROUP_PREFIX) {
+        Some(rest) => vega_core::GroupId::from_display(rest)
+            .map(vega_core::Conversation::Group)
+            .map_err(fail),
+        None => AccountId::from_display(key)
+            .map(vega_core::Conversation::Direct)
+            .map_err(fail),
+    }
+}
+
+/// A group id from the string the interface holds, with or without the prefix.
+fn group_id_of(key: &str) -> Result<vega_core::GroupId, String> {
+    vega_core::GroupId::from_display(key.strip_prefix(THREAD_GROUP_PREFIX).unwrap_or(key))
+        .map_err(fail)
+}
+
 /// A transfer id from the hex the interface was given.
 fn transfer_id(hex: &str) -> Result<[u8; 32], String> {
     data_encoding::HEXLOWER
@@ -615,18 +696,28 @@ async fn history(ctx: State<'_, Ctx>) -> Result<Vec<HistoryView>, String> {
     let counts = rt.store.message_counts().map_err(fail)?;
     Ok(counts
         .into_iter()
-        .map(|(account, messages)| {
-            let name = rt
-                .store
-                .get_contact(&account)
-                .ok()
-                .flatten()
-                .map(|c| c.display_name)
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| account.short());
+        .map(|(which, messages)| {
+            let name = match which {
+                vega_core::Conversation::Direct(account) => rt
+                    .store
+                    .get_contact(&account)
+                    .ok()
+                    .flatten()
+                    .map(|c| c.display_name)
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| account.short()),
+                vega_core::Conversation::Group(group) => rt
+                    .store
+                    .get_group(&group)
+                    .ok()
+                    .flatten()
+                    .map(|g| g.name)
+                    .unwrap_or_else(|| group.short()),
+            };
             HistoryView {
-                account_id: account.to_display(),
+                account_id: thread_key(&which),
                 display_name: name,
+                group: which.as_group().is_some(),
                 messages,
             }
         })
@@ -635,11 +726,11 @@ async fn history(ctx: State<'_, Ctx>) -> Result<Vec<HistoryView>, String> {
 
 #[tauri::command]
 async fn conversation(with: String, ctx: State<'_, Ctx>) -> Result<Vec<MessageView>, String> {
-    let account = AccountId::from_display(&with).map_err(fail)?;
+    let which = thread_of(&with)?;
     let rt = ctx.shared.lock().await;
     Ok(rt
         .store
-        .conversation(&account, 500)
+        .conversation(&which, 500)
         .map_err(fail)?
         .into_iter()
         .filter_map(|m| {
@@ -687,6 +778,188 @@ async fn conversation(with: String, ctx: State<'_, Ctx>) -> Result<Vec<MessageVi
         .collect())
 }
 
+// ---------------------------------------------------------------- groups
+
+/// Start a group.
+///
+/// The people named have to be contacts already: there is no directory to look
+/// anyone up in, and a group is not a way around exchanging invites. Everyone
+/// named is told about it immediately, which is also how they learn they are in
+/// it — there is no invitation to accept, for the same reason there is no
+/// server to hold one.
+///
+/// Returns the new thread's key, and anybody it could not be delivered to.
+#[tauri::command]
+async fn create_group(
+    name: String,
+    members: Vec<String>,
+    ctx: State<'_, Ctx>,
+) -> Result<GroupView, String> {
+    let members: Result<Vec<AccountId>, String> = members
+        .iter()
+        .map(|m| AccountId::from_display(m).map_err(fail))
+        .collect();
+    let members = members?;
+
+    let mut rt = ctx.shared.lock().await;
+    for member in &members {
+        if rt.store.get_contact(member).map_err(fail)?.is_none() {
+            return Err("everybody in a group has to be one of your contacts first".into());
+        }
+    }
+
+    let (id, _unreachable) = rt.create_group(&name, &members).map_err(fail)?;
+    let group = rt.store.get_group(&id).map_err(fail)?.ok_or("no group")?;
+    Ok(group_view(&group, &rt))
+}
+
+#[tauri::command]
+async fn list_groups(ctx: State<'_, Ctx>) -> Result<Vec<GroupView>, String> {
+    let rt = ctx.shared.lock().await;
+    let mut groups = rt.store.list_groups().map_err(fail)?;
+    // Newest first, which is the order somebody who just made one expects.
+    groups.sort_by_key(|g| std::cmp::Reverse(g.created_at));
+    Ok(groups.iter().map(|g| group_view(g, &rt)).collect())
+}
+
+#[tauri::command]
+async fn send_group_message(
+    group: String,
+    text: String,
+    ctx: State<'_, Ctx>,
+) -> Result<Vec<String>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("nothing to send".into());
+    }
+    let id = group_id_of(&group)?;
+    let unreachable = {
+        let mut rt = ctx.shared.lock().await;
+        rt.send_group_text(&id, text).map_err(fail)?
+    };
+    flush(&ctx).await;
+    Ok(unreachable.iter().map(|a| a.to_display()).collect())
+}
+
+/// Add somebody. Creator only — the runtime refuses otherwise.
+#[tauri::command]
+async fn add_to_group(
+    group: String,
+    account: String,
+    ctx: State<'_, Ctx>,
+) -> Result<GroupView, String> {
+    let id = group_id_of(&group)?;
+    let who = AccountId::from_display(&account).map_err(fail)?;
+
+    let view = {
+        let mut rt = ctx.shared.lock().await;
+        if rt.store.get_contact(&who).map_err(fail)?.is_none() {
+            return Err("add them as a contact first".into());
+        }
+        rt.add_to_group(&id, who).map_err(fail)?;
+        let group = rt.store.get_group(&id).map_err(fail)?.ok_or("no group")?;
+        group_view(&group, &rt)
+    };
+    flush(&ctx).await;
+    Ok(view)
+}
+
+#[tauri::command]
+async fn remove_from_group(
+    group: String,
+    account: String,
+    ctx: State<'_, Ctx>,
+) -> Result<GroupView, String> {
+    let id = group_id_of(&group)?;
+    let who = AccountId::from_display(&account).map_err(fail)?;
+
+    let view = {
+        let mut rt = ctx.shared.lock().await;
+        rt.remove_from_group(&id, who).map_err(fail)?;
+        let group = rt.store.get_group(&id).map_err(fail)?.ok_or("no group")?;
+        group_view(&group, &rt)
+    };
+    flush(&ctx).await;
+    Ok(view)
+}
+
+#[tauri::command]
+async fn rename_group(
+    group: String,
+    name: String,
+    ctx: State<'_, Ctx>,
+) -> Result<GroupView, String> {
+    let id = group_id_of(&group)?;
+    let view = {
+        let mut rt = ctx.shared.lock().await;
+        rt.rename_group(&id, &name).map_err(fail)?;
+        let group = rt.store.get_group(&id).map_err(fail)?.ok_or("no group")?;
+        group_view(&group, &rt)
+    };
+    flush(&ctx).await;
+    Ok(view)
+}
+
+/// Leave a group, telling the others on the way out.
+///
+/// The thread stays; what ends is being able to send to it. Deleting it is
+/// [`delete_group`], and deliberately a separate decision.
+#[tauri::command]
+async fn leave_group(group: String, ctx: State<'_, Ctx>) -> Result<GroupView, String> {
+    let id = group_id_of(&group)?;
+    let view = {
+        let mut rt = ctx.shared.lock().await;
+        rt.leave_group(&id).map_err(fail)?;
+        let group = rt.store.get_group(&id).map_err(fail)?.ok_or("no group")?;
+        group_view(&group, &rt)
+    };
+    flush(&ctx).await;
+    Ok(view)
+}
+
+/// Forget a group and everything said in it, on this device.
+///
+/// Local. The others keep their copy of the conversation, and nothing tells them
+/// this happened — the same as clearing a one-to-one history.
+#[tauri::command]
+async fn delete_group(group: String, ctx: State<'_, Ctx>) -> Result<usize, String> {
+    let id = group_id_of(&group)?;
+    let rt = ctx.shared.lock().await;
+    rt.store.drop_group(&id).map_err(fail)
+}
+
+fn group_view(group: &vega_core::Group, rt: &Runtime) -> GroupView {
+    let me = rt.identity.account_id;
+    GroupView {
+        id: thread_key(&vega_core::Conversation::Group(group.id)),
+        name: group.name.clone(),
+        creator: group.creator.to_display(),
+        mine: group.creator == me,
+        members: group
+            .members
+            .iter()
+            .map(|account| {
+                let contact = rt.store.get_contact(account).ok().flatten();
+                GroupMemberView {
+                    account_id: account.to_display(),
+                    display_name: match (&contact, *account == me) {
+                        (_, true) => "You".to_string(),
+                        (Some(c), _) if !c.display_name.is_empty() => c.display_name.clone(),
+                        _ => account.short(),
+                    },
+                    self_: *account == me,
+                    unreachable: contact.is_none() && *account != me,
+                }
+            })
+            .collect(),
+        departed: group.departed,
+        unread: rt
+            .store
+            .unread(&vega_core::Conversation::Group(group.id), group.read_seq)
+            .unwrap_or_default(),
+    }
+}
+
 #[tauri::command]
 async fn network(ctx: State<'_, Ctx>) -> Result<NetworkView, String> {
     let peer_id = ctx.net.local_peer_id().await.map_err(fail)?;
@@ -713,7 +986,7 @@ fn view_of(c: &vega_core::Contact, rt: &Runtime) -> ContactView {
         // important thing on the row.
         unread: rt
             .store
-            .unread(&c.account_id, c.read_seq)
+            .unread(&c.account_id.into(), c.read_seq)
             .unwrap_or_default(),
     }
 }
@@ -943,7 +1216,10 @@ async fn pump(app: AppHandle, ctx: Ctx, mut events: tokio::sync::mpsc::Receiver<
                         transfer,
                         name,
                         bytes,
-                    } => (Some(conversation), Some((transfer, name, bytes))),
+                    } => (
+                        Some(vega_core::Conversation::Direct(conversation)),
+                        Some((transfer, name, bytes)),
+                    ),
                     _ => (None, None),
                 },
                 _ => (None, None),
@@ -963,7 +1239,9 @@ async fn pump(app: AppHandle, ctx: Ctx, mut events: tokio::sync::mpsc::Receiver<
         }
 
         if let Some(conversation) = decrypted {
-            let _ = app.emit(EVT_MESSAGE, conversation.to_display());
+            // The same string the interface passes back to `conversation`, so a
+            // group thread and a contact thread refresh through one path.
+            let _ = app.emit(EVT_MESSAGE, thread_key(&conversation));
         }
 
         match &event {
@@ -1108,6 +1386,50 @@ fn require_dev_server() {
     std::process::exit(1);
 }
 
+/// Run-loop events that only Android has an opinion about.
+///
+/// Two things follow from a foreground service holding the process open after
+/// the last activity is gone, and both are handled here rather than in the
+/// plugin, because both are about Tauri's window rather than about Android.
+#[cfg(target_os = "android")]
+fn on_run_event(app: &AppHandle, event: tauri::RunEvent) {
+    match event {
+        // Without this the process dies with the last activity and the service
+        // has nothing left to keep alive. On the desktop the same call would
+        // mean the app could not be quit, which is why this is Android only.
+        tauri::RunEvent::ExitRequested { api, .. } => api.prevent_exit(),
+
+        tauri::RunEvent::Resumed => {
+            // tauri-apps/tauri#15671: an activity recreated after the task was
+            // swiped away gets a fresh id, Tauri finds no window filed under
+            // it, and the app comes up blank. Open as of Tauri 2.11.5;
+            // rebuilding the window is the workaround until it lands.
+            if app.webview_windows().is_empty() {
+                tracing::info!("resumed with no window — rebuilding it");
+                if let Err(e) =
+                    tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+                        .build()
+                {
+                    tracing::error!(error = %e, "could not rebuild the window");
+                }
+            }
+
+            // Idempotent, and the cheapest place to recover from a service the
+            // system killed or the user stopped from the notification.
+            if let Err(e) = vega_android::start(app, vega_android::Notice::default()) {
+                tracing::debug!(error = %e, "foreground service did not restart on resume");
+            }
+        }
+
+        _ => {}
+    }
+}
+
+/// Nothing on any other platform: a desktop process is not killed for being in
+/// the background, and preventing exit there would mean the app could not quit.
+#[cfg(not(target_os = "android"))]
+fn on_run_event(_app: &AppHandle, _event: tauri::RunEvent) {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Before tracing is initialised, so the explanation is not buried under a
@@ -1123,6 +1445,8 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        // Registered on every platform; off Android it does nothing.
+        .plugin(vega_android::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let handle = app.handle().clone();
@@ -1141,6 +1465,14 @@ pub fn run() {
             tauri::async_runtime::spawn(announce_loop(ctx.clone()));
             tauri::async_runtime::spawn(upkeep_loop(ctx.clone()));
             tauri::async_runtime::spawn(retry_loop(ctx));
+
+            // The node is up; ask Android to stop killing the process it runs
+            // in. Not fatal if it fails — what is lost is background delivery,
+            // which is where this was before the service was written.
+            if let Err(e) = vega_android::start(app.handle(), vega_android::Notice::default()) {
+                tracing::warn!(error = %e, "no foreground service: delivery stops when the app does");
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1162,9 +1494,18 @@ pub fn run() {
             history,
             conversation,
             network,
+            create_group,
+            list_groups,
+            send_group_message,
+            add_to_group,
+            remove_from_group,
+            rename_group,
+            leave_group,
+            delete_group,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Vega");
+        .build(tauri::generate_context!())
+        .expect("error while starting Vega")
+        .run(on_run_event);
 }
 
 #[cfg(test)]

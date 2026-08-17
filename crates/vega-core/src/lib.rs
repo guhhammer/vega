@@ -17,6 +17,7 @@ pub mod at_rest;
 pub mod codec;
 pub mod envelope;
 pub mod error;
+pub mod group;
 pub mod identity;
 pub mod keys;
 pub mod seal;
@@ -30,11 +31,12 @@ pub use envelope::{
     MAX_FILE_BYTES,
 };
 pub use error::{Error, Result};
+pub use group::{Group, GroupChange, GroupId, GroupOp, MAX_GROUPS_PER_CREATOR, MAX_GROUP_MEMBERS};
 pub use identity::{AccountId, DeviceId, DeviceRecord, Identity, PrekeyBundle};
 pub use keys::{DhKey, Sig, VerifyKey};
-pub use session::{fan_out, Directory, Opened, Recipient, Sessions};
+pub use session::{fan_out, fan_out_to, Directory, Opened, Recipient, Sessions};
 pub use sigchain::{ChainState, Sigchain};
-pub use store::{Contact, OutboxItem, Store, StoredMessage, Transfer};
+pub use store::{Contact, Conversation, OutboxItem, Store, StoredMessage, Transfer};
 pub use tag::{epoch_at, Pairwise, Tag, EPOCH_SECS};
 
 /// Seconds since the unix epoch.

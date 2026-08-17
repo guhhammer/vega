@@ -8,6 +8,7 @@
 use crate::at_rest::{self, purpose};
 use crate::envelope::Content;
 use crate::error::{Error, Result};
+use crate::group::{Group, GroupId};
 use crate::identity::{AccountId, DeviceId, Identity, IdentityPickle};
 use crate::keys::DhKey;
 use crate::session::Sessions;
@@ -22,6 +23,10 @@ use std::path::Path;
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const CHAINS: TableDefinition<&str, &[u8]> = TableDefinition::new("chains");
 const CONTACTS: TableDefinition<&str, &[u8]> = TableDefinition::new("contacts");
+/// Groups this device belongs to, or used to. Sealed like a contact: a group's
+/// name and its member list are exactly the kind of thing this database exists
+/// not to leave lying in the clear.
+const GROUPS: TableDefinition<&str, &[u8]> = TableDefinition::new("groups");
 const SESSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("sessions");
 const MESSAGES: TableDefinition<u64, &[u8]> = TableDefinition::new("messages");
 /// conversation → the sequence numbers it contains. Without this, reading a
@@ -82,11 +87,131 @@ struct StoredSession {
     remote: DhKey,
 }
 
+/// Which thread a message belongs to.
+///
+/// ## On the disk format
+///
+/// This serialises as a single string, and a [`Conversation::Direct`] serialises
+/// to exactly the hex an [`AccountId`] always did. That is not decoration: there
+/// are installs with history in them, and a stored message whose `conversation`
+/// field stopped parsing would take that history with it. Old records read back
+/// as `Direct`, which is what they were.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Conversation {
+    /// One other person.
+    Direct(AccountId),
+    /// A group. See [`crate::group`].
+    Group(GroupId),
+}
+
+/// Marks the group form in both the serialised field and the index key.
+///
+/// An account's display form is lowercase base32 in dash-separated groups of
+/// four, and its serialised form is 64 hex characters. Neither can start with
+/// this, so the two spaces cannot collide.
+const GROUP_PREFIX: &str = "group:";
+
+impl Conversation {
+    /// The key this conversation's messages are indexed under.
+    ///
+    /// Direct conversations keep the exact key they have always used, so the
+    /// index in an existing database still resolves.
+    pub fn index_key(&self) -> String {
+        match self {
+            Self::Direct(account) => account.to_display(),
+            Self::Group(group) => format!("{GROUP_PREFIX}{}", group.to_display()),
+        }
+    }
+
+    /// Parse a key back out of the index.
+    ///
+    /// `None` for anything that is neither form, which is how a key written by
+    /// a future version stays survivable rather than fatal.
+    pub fn from_index_key(key: &str) -> Option<Self> {
+        match key.strip_prefix(GROUP_PREFIX) {
+            Some(rest) => GroupId::from_display(rest).ok().map(Self::Group),
+            None => AccountId::from_display(key).ok().map(Self::Direct),
+        }
+    }
+
+    pub fn as_direct(&self) -> Option<AccountId> {
+        match self {
+            Self::Direct(account) => Some(*account),
+            Self::Group(_) => None,
+        }
+    }
+
+    pub fn as_group(&self) -> Option<GroupId> {
+        match self {
+            Self::Group(group) => Some(*group),
+            Self::Direct(_) => None,
+        }
+    }
+
+    fn to_wire(self) -> String {
+        match self {
+            Self::Direct(account) => data_encoding::HEXLOWER.encode(account.as_bytes()),
+            Self::Group(group) => format!(
+                "{GROUP_PREFIX}{}",
+                data_encoding::HEXLOWER.encode(group.as_bytes())
+            ),
+        }
+    }
+
+    fn from_wire(s: &str) -> std::result::Result<Self, String> {
+        let (make, hex): (fn([u8; 32]) -> Self, &str) = match s.strip_prefix(GROUP_PREFIX) {
+            Some(rest) => (|b| Self::Group(GroupId::from_raw(b)), rest),
+            None => (|b| Self::Direct(AccountId::from_raw(b)), s),
+        };
+        let raw = data_encoding::HEXLOWER
+            .decode(hex.as_bytes())
+            .map_err(|e| e.to_string())?;
+        let bytes: [u8; 32] = raw
+            .try_into()
+            .map_err(|_| "a conversation id is 32 bytes".to_string())?;
+        Ok(make(bytes))
+    }
+}
+
+impl std::fmt::Display for Conversation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Direct(account) => write!(f, "{account}"),
+            Self::Group(group) => write!(f, "{GROUP_PREFIX}{group}"),
+        }
+    }
+}
+
+impl Serialize for Conversation {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_wire())
+    }
+}
+
+impl<'de> Deserialize<'de> for Conversation {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Self::from_wire(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+impl From<AccountId> for Conversation {
+    fn from(account: AccountId) -> Self {
+        Self::Direct(account)
+    }
+}
+
+impl From<GroupId> for Conversation {
+    fn from(group: GroupId) -> Self {
+        Self::Group(group)
+    }
+}
+
 /// A message as stored locally, after decryption.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredMessage {
     pub seq: u64,
-    pub conversation: AccountId,
+    pub conversation: Conversation,
     pub from_account: AccountId,
     pub from_device: DeviceId,
     pub outgoing: bool,
@@ -199,6 +324,7 @@ impl Store {
             tx.open_table(META)?;
             tx.open_table(CHAINS)?;
             tx.open_table(CONTACTS)?;
+            tx.open_table(GROUPS)?;
             tx.open_table(SESSIONS)?;
             tx.open_table(MESSAGES)?;
             tx.open_multimap_table(BY_CONVERSATION)?;
@@ -309,6 +435,55 @@ impl Store {
         Ok(out)
     }
 
+    // ---- groups ----
+
+    pub fn put_group(&self, group: &Group) -> Result<()> {
+        let bytes = self.sealed(purpose::GROUP, group)?;
+        let tx = self.db.begin_write()?;
+        {
+            let mut t = tx.open_table(GROUPS)?;
+            t.insert(group.id.to_display().as_str(), bytes.as_slice())?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_group(&self, group: &GroupId) -> Result<Option<Group>> {
+        let tx = self.db.begin_read()?;
+        let t = tx.open_table(GROUPS)?;
+        let Some(v) = t.get(group.to_display().as_str())? else {
+            return Ok(None);
+        };
+        Ok(Some(self.opened(purpose::GROUP, v.value())?))
+    }
+
+    pub fn list_groups(&self) -> Result<Vec<Group>> {
+        let tx = self.db.begin_read()?;
+        let t = tx.open_table(GROUPS)?;
+        let mut out = Vec::new();
+        for row in t.iter()? {
+            let (_, v) = row?;
+            out.push(self.opened(purpose::GROUP, v.value())?);
+        }
+        Ok(out)
+    }
+
+    /// Forget a group entirely, along with everything said in it.
+    ///
+    /// Leaving a group does not do this — a thread you have left is still a
+    /// thread you were in, and deleting it silently would be a surprise. This is
+    /// what the UI calls "delete", and it is local: the others keep their copy.
+    pub fn drop_group(&self, group: &GroupId) -> Result<usize> {
+        let cleared = self.clear_conversation(&Conversation::Group(*group))?;
+        let tx = self.db.begin_write()?;
+        {
+            let mut t = tx.open_table(GROUPS)?;
+            t.remove(group.to_display().as_str())?;
+        }
+        tx.commit()?;
+        Ok(cleared)
+    }
+
     // ---- olm sessions ----
 
     pub fn save_sessions(&self, sessions: &Sessions, pickle_key: &[u8; 32]) -> Result<()> {
@@ -373,7 +548,7 @@ impl Store {
                 t.insert(msg.seq, bytes.as_slice())?;
 
                 let mut index = tx.open_multimap_table(BY_CONVERSATION)?;
-                index.insert(msg.conversation.to_display().as_str(), msg.seq)?;
+                index.insert(msg.conversation.index_key().as_str(), msg.seq)?;
                 true
             }
         };
@@ -391,13 +566,13 @@ impl Store {
     /// the messages in *this* conversation, not to everything ever stored.
     /// Sequence numbers are allocated monotonically, so the multimap's ordering
     /// is chronological and the tail is what we want.
-    pub fn conversation(&self, other: &AccountId, limit: usize) -> Result<Vec<StoredMessage>> {
+    pub fn conversation(&self, which: &Conversation, limit: usize) -> Result<Vec<StoredMessage>> {
         let tx = self.db.begin_read()?;
         let index = tx.open_multimap_table(BY_CONVERSATION)?;
         let messages = tx.open_table(MESSAGES)?;
 
         let mut seqs: Vec<u64> = index
-            .get(other.to_display().as_str())?
+            .get(which.index_key().as_str())?
             .filter_map(|v| v.ok().map(|v| v.value()))
             .collect();
         if seqs.len() > limit {
@@ -420,11 +595,11 @@ impl Store {
     ///
     /// What a read marker is set to when the conversation is on screen. Read
     /// from the index alone, so it costs nothing on a long history.
-    pub fn last_seq(&self, other: &AccountId) -> Result<u64> {
+    pub fn last_seq(&self, which: &Conversation) -> Result<u64> {
         let tx = self.db.begin_read()?;
         let index = tx.open_multimap_table(BY_CONVERSATION)?;
         Ok(index
-            .get(other.to_display().as_str())?
+            .get(which.index_key().as_str())?
             .filter_map(|v| v.ok().map(|v| v.value()))
             .max()
             .unwrap_or(0))
@@ -440,13 +615,13 @@ impl Store {
     /// proportional to what is *unread* rather than to what is stored — a
     /// conversation with ten years behind it and nothing new costs one index
     /// lookup, which is the case this runs in almost every time.
-    pub fn unread(&self, other: &AccountId, after_seq: u64) -> Result<usize> {
+    pub fn unread(&self, which: &Conversation, after_seq: u64) -> Result<usize> {
         let tx = self.db.begin_read()?;
         let index = tx.open_multimap_table(BY_CONVERSATION)?;
         let messages = tx.open_table(MESSAGES)?;
 
         let mut count = 0;
-        for row in index.get(other.to_display().as_str())? {
+        for row in index.get(which.index_key().as_str())? {
             let seq = row?.value();
             if seq <= after_seq {
                 continue;
@@ -467,16 +642,16 @@ impl Store {
     ///
     /// Read from the index alone, so it costs nothing to show for an account
     /// with years of history behind it.
-    pub fn message_counts(&self) -> Result<Vec<(AccountId, usize)>> {
+    pub fn message_counts(&self) -> Result<Vec<(Conversation, usize)>> {
         let tx = self.db.begin_read()?;
         let index = tx.open_multimap_table(BY_CONVERSATION)?;
         let mut out = Vec::new();
         for row in index.iter()? {
             let (key, seqs) = row?;
-            let Ok(account) = AccountId::from_display(key.value()) else {
+            let Some(which) = Conversation::from_index_key(key.value()) else {
                 continue;
             };
-            out.push((account, seqs.count()));
+            out.push((which, seqs.count()));
         }
         // Busiest first: the conversation someone wants to clear is usually the
         // one with the most in it.
@@ -495,8 +670,8 @@ impl Store {
     /// The outbox is left alone too. A message already handed over is on its
     /// way, and quietly cancelling it would tell the sender something untrue
     /// about what the other person is going to see.
-    pub fn clear_conversation(&self, other: &AccountId) -> Result<usize> {
-        let key = other.to_display();
+    pub fn clear_conversation(&self, which: &Conversation) -> Result<usize> {
+        let key = which.index_key();
         let tx = self.db.begin_write()?;
         let removed = {
             let mut index = tx.open_multimap_table(BY_CONVERSATION)?;
@@ -514,8 +689,12 @@ impl Store {
         };
         tx.commit()?;
 
-        for transfer in self.transfers_in(other)? {
-            self.drop_transfer(&transfer)?;
+        // Files are a one-to-one feature, so only a direct conversation can
+        // have transfers filed under it.
+        if let Some(other) = which.as_direct() {
+            for transfer in self.transfers_in(&other)? {
+                self.drop_transfer(&transfer)?;
+            }
         }
         Ok(removed)
     }
@@ -1146,7 +1325,7 @@ mod tests {
             store
                 .append_message(&StoredMessage {
                     seq: store.next_message_seq().unwrap(),
-                    conversation: who,
+                    conversation: who.into(),
                     from_account: who,
                     from_device: DeviceId([1u8; 32]),
                     outgoing: false,
@@ -1192,7 +1371,9 @@ mod tests {
         let contacts = store.list_contacts().unwrap();
         assert_eq!(contacts.len(), 1);
         assert_eq!(contacts[0].display_name, called);
-        let thread = store.conversation(&contacts[0].account_id, 10).unwrap();
+        let thread = store
+            .conversation(&contacts[0].account_id.into(), 10)
+            .unwrap();
         assert_eq!(thread[0].content.text(), Some(said));
         assert_eq!(store.pending().unwrap().len(), 1);
     }
@@ -1309,7 +1490,7 @@ mod tests {
         let who = Identity::create("x").account_id;
         let msg = StoredMessage {
             seq: store.next_message_seq().unwrap(),
-            conversation: who,
+            conversation: who.into(),
             from_account: who,
             from_device: DeviceId([3u8; 32]),
             outgoing: false,
@@ -1322,7 +1503,13 @@ mod tests {
         let mut replay = msg.clone();
         replay.seq = store.next_message_seq().unwrap();
         assert!(!store.append_message(&replay).unwrap());
-        assert_eq!(store.conversation(&who, 100).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .conversation(&Conversation::Direct(who), 100)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     /// The badge on a contact row. Wrong in either direction is bad — one way
@@ -1338,7 +1525,7 @@ mod tests {
             store
                 .append_message(&StoredMessage {
                     seq,
-                    conversation: who,
+                    conversation: who.into(),
                     from_account: who,
                     from_device: DeviceId([0u8; 32]),
                     outgoing,
@@ -1352,18 +1539,34 @@ mod tests {
         // A conversation nobody has looked at yet: everything incoming counts.
         send(a, "one", false);
         let second = send(a, "two", false);
-        assert_eq!(store.unread(&a, 0).unwrap(), 2);
+        assert_eq!(store.unread(&Conversation::Direct(a), 0).unwrap(), 2);
 
         // Read up to the second, and only what came after it is left.
         send(a, "three", false);
-        assert_eq!(store.unread(&a, second).unwrap(), 1);
-        assert_eq!(store.unread(&a, store.last_seq(&a).unwrap()).unwrap(), 0);
+        assert_eq!(store.unread(&Conversation::Direct(a), second).unwrap(), 1);
+        assert_eq!(
+            store
+                .unread(
+                    &Conversation::Direct(a),
+                    store.last_seq(&Conversation::Direct(a)).unwrap()
+                )
+                .unwrap(),
+            0
+        );
 
         // Your own replies are not something to be notified about.
         send(a, "mine", true);
-        assert_eq!(store.unread(&a, store.last_seq(&a).unwrap()).unwrap(), 0);
         assert_eq!(
-            store.unread(&a, second).unwrap(),
+            store
+                .unread(
+                    &Conversation::Direct(a),
+                    store.last_seq(&Conversation::Direct(a)).unwrap()
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store.unread(&Conversation::Direct(a), second).unwrap(),
             1,
             "a reply is not unread"
         );
@@ -1371,10 +1574,10 @@ mod tests {
         // Conversations are counted apart, and one with nothing in it is zero
         // rather than an error.
         send(b, "hello", false);
-        assert_eq!(store.unread(&b, 0).unwrap(), 1);
+        assert_eq!(store.unread(&Conversation::Direct(b), 0).unwrap(), 1);
         let empty = Identity::create("nobody").account_id;
-        assert_eq!(store.last_seq(&empty).unwrap(), 0);
-        assert_eq!(store.unread(&empty, 0).unwrap(), 0);
+        assert_eq!(store.last_seq(&Conversation::Direct(empty)).unwrap(), 0);
+        assert_eq!(store.unread(&Conversation::Direct(empty), 0).unwrap(), 0);
     }
 
     #[test]
@@ -1386,7 +1589,7 @@ mod tests {
         for (who, text) in [(a, "a1"), (b, "b1"), (a, "a2")] {
             let msg = StoredMessage {
                 seq: store.next_message_seq().unwrap(),
-                conversation: who,
+                conversation: who.into(),
                 from_account: who,
                 from_device: DeviceId([0u8; 32]),
                 outgoing: false,
@@ -1396,7 +1599,7 @@ mod tests {
             store.append_message(&msg).unwrap();
         }
 
-        let convo = store.conversation(&a, 100).unwrap();
+        let convo = store.conversation(&Conversation::Direct(a), 100).unwrap();
         assert_eq!(convo.len(), 2);
         assert_eq!(convo[0].content.text(), Some("a1"));
         assert_eq!(convo[1].content.text(), Some("a2"));
@@ -1410,7 +1613,7 @@ mod tests {
         let push = |text: &str, at: u64| {
             let msg = StoredMessage {
                 seq: store.next_message_seq().unwrap(),
-                conversation: who,
+                conversation: who.into(),
                 from_account: who,
                 from_device: DeviceId([0u8; 32]),
                 outgoing: false,
@@ -1459,7 +1662,7 @@ mod tests {
         content.id = [id; 32];
         StoredMessage {
             seq: store.next_message_seq().unwrap(),
-            conversation,
+            conversation: conversation.into(),
             from_account: conversation,
             from_device: DeviceId([1u8; 32]),
             outgoing: false,
@@ -1491,14 +1694,33 @@ mod tests {
         his.conversation = bob;
         store.begin_transfer(&his).unwrap();
 
-        assert_eq!(store.clear_conversation(&alice).unwrap(), 3);
-        assert!(store.conversation(&alice, 100).unwrap().is_empty());
-        assert_eq!(store.conversation(&bob, 100).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .clear_conversation(&Conversation::Direct(alice))
+                .unwrap(),
+            3
+        );
+        assert!(store
+            .conversation(&Conversation::Direct(alice), 100)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .conversation(&Conversation::Direct(bob), 100)
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(store.get_transfer(&hers.transfer).unwrap().is_none());
         assert!(store.get_transfer(&his.transfer).unwrap().is_some());
 
         // Clearing a conversation that has nothing in it is not an error.
-        assert_eq!(store.clear_conversation(&alice).unwrap(), 0);
+        assert_eq!(
+            store
+                .clear_conversation(&Conversation::Direct(alice))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -1508,7 +1730,9 @@ mod tests {
         let msg = message_in(&store, alice, 42);
 
         store.append_message(&msg).unwrap();
-        store.clear_conversation(&alice).unwrap();
+        store
+            .clear_conversation(&Conversation::Direct(alice))
+            .unwrap();
 
         // The same ciphertext, still parked in a mailbox somewhere, arrives
         // again. Deleting history is not consent to receive it a second time.
@@ -1516,7 +1740,10 @@ mod tests {
             !store.append_message(&msg).unwrap(),
             "a replayed message must not resurrect a cleared conversation"
         );
-        assert!(store.conversation(&alice, 100).unwrap().is_empty());
+        assert!(store
+            .conversation(&Conversation::Direct(alice), 100)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1529,12 +1756,21 @@ mod tests {
         store.append_message(&message_in(&store, bob, 3)).unwrap();
         store.begin_transfer(&transfer_of(&[7u8; 32])).unwrap();
 
-        assert_eq!(store.message_counts().unwrap(), vec![(alice, 2), (bob, 1)]);
+        assert_eq!(
+            store.message_counts().unwrap(),
+            vec![(alice.into(), 2), (bob.into(), 1)]
+        );
         assert_eq!(store.clear_all_messages().unwrap(), 3);
 
         assert!(store.message_counts().unwrap().is_empty());
-        assert!(store.conversation(&alice, 100).unwrap().is_empty());
-        assert!(store.conversation(&bob, 100).unwrap().is_empty());
+        assert!(store
+            .conversation(&Conversation::Direct(alice), 100)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .conversation(&Conversation::Direct(bob), 100)
+            .unwrap()
+            .is_empty());
         assert!(store.get_transfer(&[5u8; 32]).unwrap().is_none());
 
         // Contacts are not history: clearing the thread must not lose the
@@ -1607,7 +1843,7 @@ mod tests {
         for (who, text) in [(a, "a1"), (b, "b1"), (a, "a2"), (b, "b2"), (a, "a3")] {
             let msg = StoredMessage {
                 seq: store.next_message_seq().unwrap(),
-                conversation: who,
+                conversation: who.into(),
                 from_account: who,
                 from_device: DeviceId([0u8; 32]),
                 outgoing: false,
@@ -1617,13 +1853,13 @@ mod tests {
             store.append_message(&msg).unwrap();
         }
 
-        let convo = store.conversation(&a, 100).unwrap();
+        let convo = store.conversation(&Conversation::Direct(a), 100).unwrap();
         assert_eq!(convo.len(), 3);
         assert_eq!(convo[0].content.text(), Some("a1"));
         assert_eq!(convo[2].content.text(), Some("a3"));
 
         // The limit keeps the most recent, still oldest-first.
-        let tail = store.conversation(&a, 2).unwrap();
+        let tail = store.conversation(&Conversation::Direct(a), 2).unwrap();
         assert_eq!(tail.len(), 2);
         assert_eq!(tail[0].content.text(), Some("a2"));
         assert_eq!(tail[1].content.text(), Some("a3"));

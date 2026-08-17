@@ -161,6 +161,27 @@ pub enum Body {
         #[serde(with = "bytes_b64")]
         data: Vec<u8>,
     },
+
+    /// A message to a group.
+    ///
+    /// Sent once per member device, exactly like a one-to-one message — the
+    /// group id says which thread it belongs to, and nothing else about it is
+    /// special. The recipient files it under the group only after checking that
+    /// the authenticated sender is actually in that group; without that check
+    /// the id would be a sender-chosen field naming somebody else's thread.
+    GroupText {
+        group: crate::group::GroupId,
+        text: String,
+    },
+
+    /// A group's membership, as it stands after some change.
+    ///
+    /// This is the whole of group state distribution: there is no separate
+    /// invite, no join request and no delta to miss. See [`crate::group`] for
+    /// who is allowed to send one.
+    GroupOp {
+        op: crate::group::GroupOp,
+    },
 }
 
 /// Everything needed to open a file transfer.
@@ -266,7 +287,11 @@ impl Content {
         match &self.body {
             Body::Text { text } => Some(text),
             Body::SelfCopy { text, .. } => Some(text),
-            Body::Receipt { .. } | Body::File { .. } | Body::FileChunk { .. } => None,
+            Body::GroupText { text, .. } => Some(text),
+            Body::Receipt { .. }
+            | Body::File { .. }
+            | Body::FileChunk { .. }
+            | Body::GroupOp { .. } => None,
         }
     }
 

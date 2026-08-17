@@ -35,6 +35,7 @@ pub const NONCE_LEN: usize = 24;
 pub mod purpose {
     pub const MESSAGE: &[u8] = b"message";
     pub const CONTACT: &[u8] = b"contact";
+    pub const GROUP: &[u8] = b"group";
     pub const CHAIN: &[u8] = b"chain";
     pub const OUTBOX: &[u8] = b"outbox";
     pub const TRANSFER: &[u8] = b"transfer";

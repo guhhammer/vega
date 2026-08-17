@@ -57,14 +57,28 @@ batteries; contact-scoped storage is friendlier but far more limited. The
 mailbox is also in memory, so mail does not survive a restart — deliberate for
 now, since it means a relay never accumulates other people's ciphertext on disk.
 
-## P7 — Groups, then T5 ❌
+## P7 — Groups ✅, then T5 ❌
 
-Not started. Megolm pairs naturally with the vodozemac choice; MLS (openmls) is
-the modern answer with better properties at larger sizes. The decision only
-matters once one-to-one is solid.
+**Groups are done**, and by pairwise fan-out rather than a group ratchet. Megolm
+and MLS both assume a delivery service that takes one ciphertext and fans it
+out; there is none here, so a group message is one sealed envelope per member
+device whatever cipher sits inside it. Fan-out keeps the ratchet's forward
+secrecy and post-compromise security per member and adds no key material to
+distribute or rotate. A group ratchet only pays for itself alongside a
+group-addressed envelope, which would also let a relay link every member's
+traffic by one shared tag — that is the trade to revisit, not the cipher.
 
-T5 — Bluetooth LE and Wi-Fi Direct, for when there is no internet at all — is
-the most interesting tier and the least urgent.
+Only the creator may change a membership. With no server to order two admins'
+concurrent edits, one writer is the alternative to inventing consensus.
+
+**Proves:** three runtimes exchange group messages; a non-member who knows the
+group id cannot post into it; a member cannot rewrite the roster; a removed
+member is told rather than left to infer it.
+
+T5 — Bluetooth LE and Wi-Fi Direct, for when there is no internet at all —
+remains the most interesting tier and the least urgent. rust-libp2p has no BLE
+transport, so it is a custom transport plus a native plugin per platform, and
+BLE's throughput makes it text-only.
 
 ---
 

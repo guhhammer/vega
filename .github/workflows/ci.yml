@@ -85,6 +85,22 @@ jobs:
       - run: cargo test --workspace
         timeout-minutes: 20
 
+  # Advisories against the dependency tree. Runs on a schedule as well as on
+  # pushes, because a crate does not have to change for an advisory to be filed
+  # against it — the interesting failure here is the one that arrives on a
+  # Tuesday when nobody touched the lockfile.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-audit --locked
+      # `.cargo/audit.toml` lists the advisories that have been read and found
+      # not to apply, each with its reasoning. Anything not listed there fails
+      # the build.
+      - run: cargo audit
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

@@ -20,19 +20,22 @@ use x25519_dalek::{PublicKey as XPublic, StaticSecret as XSecret};
 const ACCOUNT_DOMAIN: &[u8] = b"vega:account-id:v1";
 const DEVICE_DOMAIN: &[u8] = b"vega:device-id:v1";
 
-macro_rules! hash_id {
-    ($name:ident, $domain:expr, $doc:literal) => {
+/// The parts every 32-byte identifier here shares: the wire form, the form a
+/// human reads aloud, and the ordering that makes it usable as a map key.
+///
+/// Split out from [`hash_id`] because not every id is the hash of a key — a
+/// group id names no keypair, it is just 32 random bytes, and giving it an
+/// `of(&VerifyKey)` constructor would be a lie about where it comes from.
+macro_rules! id_type {
+    ($name:ident, $doc:literal) => {
         #[doc = $doc]
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
         pub struct $name(#[serde(with = "crate::identity::hex32")] pub [u8; 32]);
 
         impl $name {
-            /// Derive the id from the public key it names.
-            pub fn of(key: &VerifyKey) -> Self {
-                let mut h = blake3::Hasher::new();
-                h.update($domain);
-                h.update(key.as_bytes());
-                Self(*h.finalize().as_bytes())
+            /// Wrap 32 bytes that are already an id.
+            pub fn from_raw(bytes: [u8; 32]) -> Self {
+                Self(bytes)
             }
 
             pub fn as_bytes(&self) -> &[u8; 32] {
@@ -51,7 +54,7 @@ macro_rules! hash_id {
             }
 
             /// Parse the display form back, tolerating case and grouping.
-            pub fn from_display(s: &str) -> Result<Self> {
+            pub fn from_display(s: &str) -> $crate::error::Result<Self> {
                 let cleaned: String = s
                     .chars()
                     .filter(|c| c.is_ascii_alphanumeric())
@@ -59,9 +62,9 @@ macro_rules! hash_id {
                     .to_uppercase();
                 let raw = data_encoding::BASE32_NOPAD
                     .decode(cleaned.as_bytes())
-                    .map_err(|e| Error::BadKey(e.to_string()))?;
+                    .map_err(|e| $crate::error::Error::BadKey(e.to_string()))?;
                 if raw.len() != 32 {
-                    return Err(Error::BadKey(format!(
+                    return Err($crate::error::Error::BadKey(format!(
                         "expected 32 bytes, got {}",
                         raw.len()
                     )));
@@ -77,25 +80,46 @@ macro_rules! hash_id {
             }
         }
 
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(&self.to_display())
             }
         }
 
-        impl fmt::Debug for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(f, "{}({})", stringify!($name), self.short())
             }
         }
 
-        impl Canonical for $name {
-            fn write_canonical(&self, w: &mut Writer) {
+        impl $crate::codec::Canonical for $name {
+            fn write_canonical(&self, w: &mut $crate::codec::Writer) {
                 w.fixed(&self.0);
             }
         }
     };
 }
+
+/// An [`id_type`] that is the hash of the public key it names.
+macro_rules! hash_id {
+    ($name:ident, $domain:expr, $doc:literal) => {
+        id_type!($name, $doc);
+
+        impl $name {
+            /// Derive the id from the public key it names.
+            pub fn of(key: &VerifyKey) -> Self {
+                let mut h = blake3::Hasher::new();
+                h.update($domain);
+                h.update(key.as_bytes());
+                Self(*h.finalize().as_bytes())
+            }
+        }
+    };
+}
+
+/// Usable from any module in this crate; `id_type` is defined before use, as
+/// macro_rules requires.
+pub(crate) use id_type;
 
 hash_id!(
     AccountId,

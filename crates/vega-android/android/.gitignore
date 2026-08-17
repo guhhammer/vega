@@ -1,0 +1,5 @@
+# Linked in by the Tauri CLI at build time, pointing at the generated project.
+/.tauri
+/build
+/.gradle
+local.properties

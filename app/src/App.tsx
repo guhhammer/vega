@@ -5,14 +5,25 @@ import {
   onMessage,
   onNetwork,
   toBase64,
+  MAX_GROUP_MEMBERS,
   type Contact,
+  type Group,
   type History,
   type InvitePreview,
   type Me,
   type Message,
 } from "./api";
 
-type Sheet = "none" | "invite" | "add" | "history";
+type Sheet = "none" | "invite" | "add" | "history" | "new-group";
+
+/**
+ * Whether a thread key names a group.
+ *
+ * One string identifies a conversation everywhere in this file — a contact's
+ * account id, or a group's id behind this prefix. Rust mints both and parses
+ * both; this is the only place the interface has to tell them apart.
+ */
+const isGroup = (key: string | null) => !!key?.startsWith("group:");
 
 /** One entry in a right-click menu. */
 type MenuItem = { label: string; danger?: boolean; run: () => void };
@@ -103,6 +114,8 @@ function fieldItems(
 type Renaming =
   | { kind: "device"; current: string }
   | { kind: "contact"; account: string; current: string }
+  /** Unlike the other two, this one everybody in the group sees. */
+  | { kind: "group"; account: string; current: string }
   | null;
 
 /* ------------------------------------------------------------------ people */
@@ -225,6 +238,8 @@ function ThemeToggle({
 export default function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
+  /** The open thread, as a key: a contact's account id or `group:<id>`. */
   const [active, setActive] = useState<string | null>(null);
   const [thread, setThread] = useState<Message[]>([]);
   const [peers, setPeers] = useState(0);
@@ -238,17 +253,20 @@ export default function App() {
   const [verifying, setVerifying] = useState<Contact | null>(null);
   /** The image being looked at full size, as a data URL. */
   const [viewing, setViewing] = useState<string | null>(null);
+  /** The group whose members are being managed. */
+  const [managing, setManaging] = useState<Group | null>(null);
 
   const current = contacts.find((c) => c.account_id === active) ?? null;
+  const currentGroup = groups.find((g) => g.id === active) ?? null;
 
   /** Unread in every conversation other than the one being looked at. */
-  const elsewhere = contacts.reduce(
-    (n, c) => (c.account_id === active ? n : n + c.unread),
-    0,
-  );
+  const elsewhere =
+    contacts.reduce((n, c) => (c.account_id === active ? n : n + c.unread), 0) +
+    groups.reduce((n, g) => (g.id === active ? n : n + g.unread), 0);
 
   const refreshContacts = useCallback(async () => {
     setContacts(await api.listContacts());
+    setGroups(await api.listGroups());
   }, []);
 
   /**
@@ -327,8 +345,46 @@ export default function App() {
     if (!active) return;
     setFault(null);
     try {
-      await api.sendMessage(active, text);
+      if (isGroup(active)) {
+        const missed = await api.sendGroupMessage(active, text);
+        // Sent, but not to everybody. Said plainly rather than swallowed: a
+        // group where some members silently never receive anything is worse
+        // than one that admits it.
+        if (missed.length > 0) {
+          setFault(
+            `Sent, but ${missed.length} member${missed.length === 1 ? " is" : "s are"} not in your contacts, so they did not get it.`,
+          );
+        }
+      } else {
+        await api.sendMessage(active, text);
+      }
       await refreshThread(active);
+    } catch (e) {
+      setFault(String(e));
+    }
+  };
+
+  /** Apply a group change and put the result back on screen. */
+  const onGroup = async (run: () => Promise<Group>) => {
+    setFault(null);
+    try {
+      const updated = await run();
+      await refreshContacts();
+      setManaging((open) => (open && open.id === updated.id ? updated : open));
+      return updated;
+    } catch (e) {
+      setFault(String(e));
+      return null;
+    }
+  };
+
+  const deleteGroup = async (id: string) => {
+    setFault(null);
+    try {
+      await api.deleteGroup(id);
+      if (active === id) setActive(null);
+      setManaging(null);
+      await refreshContacts();
     } catch (e) {
       setFault(String(e));
     }
@@ -352,6 +408,9 @@ export default function App() {
       if (renaming.kind === "device") {
         await api.renameDevice(name);
         setMe(await api.me());
+      } else if (renaming.kind === "group") {
+        await api.renameGroup(renaming.account, name);
+        await refreshContacts();
       } else {
         await api.renameContact(renaming.account, name);
         await refreshContacts();
@@ -547,6 +606,95 @@ export default function App() {
         </div>
 
         <div className="contacts">
+          {groups.length > 0 && (
+            <div className="section" aria-hidden="true">
+              groups
+            </div>
+          )}
+          {groups.map((g) => (
+            <button
+              key={g.id}
+              className="contact"
+              data-unread={g.unread > 0}
+              aria-current={g.id === active}
+              onClick={() => setActive(g.id)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setMenu({
+                  x: e.clientX,
+                  y: e.clientY,
+                  items: [
+                    { label: "Members…", run: () => setManaging(g) },
+                    ...(g.mine && !g.departed
+                      ? [
+                          {
+                            label: "Rename…",
+                            run: () =>
+                              setRenaming({
+                                kind: "group",
+                                account: g.id,
+                                current: g.name,
+                              }),
+                          },
+                        ]
+                      : []),
+                    ...(!g.mine && !g.departed
+                      ? [
+                          {
+                            label: "Leave group",
+                            danger: true,
+                            run: () => void onGroup(() => api.leaveGroup(g.id)),
+                          },
+                        ]
+                      : []),
+                    {
+                      label: "Clear this chat",
+                      danger: true,
+                      run: () => void clearChat(g.id),
+                    },
+                    {
+                      label: "Delete on this device",
+                      danger: true,
+                      run: () => void deleteGroup(g.id),
+                    },
+                  ],
+                });
+              }}
+            >
+              <Avatar id={g.id} name={g.name} />
+              <span className="contact-text">
+                <span className="name">
+                  {g.name}
+                  {g.departed && (
+                    <span
+                      className="check"
+                      title="You are no longer in this group"
+                    >
+                      ↩
+                    </span>
+                  )}
+                </span>
+                <span className="sub">
+                  {g.members.length} member{g.members.length === 1 ? "" : "s"}
+                </span>
+              </span>
+              {g.unread > 0 && (
+                <span
+                  className="unread"
+                  aria-label={`${g.unread} unread message${g.unread === 1 ? "" : "s"}`}
+                >
+                  {g.unread > 99 ? "99+" : g.unread}
+                </span>
+              )}
+            </button>
+          ))}
+
+          {groups.length > 0 && contacts.length > 0 && (
+            <div className="section" aria-hidden="true">
+              contacts
+            </div>
+          )}
           {contacts.map((c) => (
             <button
               key={c.account_id}
@@ -632,7 +780,7 @@ export default function App() {
               to understand: there is no directory, and an invite is not a
               request the other end can accept. Both halves of the exchange are
               numbered and each is the button that performs it. */}
-          {contacts.length === 0 && (
+          {contacts.length === 0 && groups.length === 0 && (
             <div className="empty">
               <span className="glyph" aria-hidden="true">
                 ✦
@@ -684,6 +832,19 @@ export default function App() {
             </span>
             Add contact
           </button>
+          {/* Offered only once there is somebody to put in one: a group of you
+              is not a thing worth making, and the button would be a dead end. */}
+          {contacts.length > 0 && (
+            <button
+              title="A group is a name and a list of your contacts. Everyone in it is told immediately — there is no invitation to accept, because there is no server to hold one."
+              onClick={() => setSheet("new-group")}
+            >
+              <span className="glyph" aria-hidden="true">
+                ◇
+              </span>
+              New group
+            </button>
+          )}
           <button
             title="Everything stored on this device, and the means to delete it"
             onClick={() => setSheet("history")}
@@ -697,7 +858,78 @@ export default function App() {
       </aside>
 
       <main className="chat">
-        {current ? (
+        {currentGroup ? (
+          <>
+            <header>
+              <button
+                className="icon back"
+                aria-label={
+                  elsewhere > 0
+                    ? `Back to conversations, ${elsewhere} unread`
+                    : "Back to conversations"
+                }
+                onClick={() => setActive(null)}
+              >
+                ←
+                {elsewhere > 0 && (
+                  <span className="unread" aria-hidden="true">
+                    {elsewhere > 99 ? "99+" : elsewhere}
+                  </span>
+                )}
+              </button>
+              <Avatar id={currentGroup.id} name={currentGroup.name} />
+              <div className="chat-who">
+                <h2>{currentGroup.name}</h2>
+                <span className="chat-sub">
+                  {currentGroup.members.length} member
+                  {currentGroup.members.length === 1 ? "" : "s"}
+                  {currentGroup.mine ? " · yours" : ""}
+                </span>
+              </div>
+
+              <button
+                className="verify"
+                title="Who is in this group, and who may change it"
+                onClick={() => setManaging(currentGroup)}
+              >
+                members
+              </button>
+
+              {currentGroup.mine && !currentGroup.departed && (
+                <button
+                  className="icon"
+                  title="Rename this group for everybody in it"
+                  aria-label="Rename this group"
+                  onClick={() =>
+                    setRenaming({
+                      kind: "group",
+                      account: currentGroup.id,
+                      current: currentGroup.name,
+                    })
+                  }
+                >
+                  ✎
+                </button>
+              )}
+            </header>
+            <Thread
+              messages={thread}
+              onMenu={setMenu}
+              onOpenImage={setViewing}
+            />
+            {currentGroup.departed ? (
+              <div className="composer-note">
+                You are no longer in this group. What was said is still here.
+              </div>
+            ) : (
+              /* No file button: a file to a group would be sent once per member
+                 device, so a three-megabyte photo to eight people is
+                 twenty-four megabytes off this machine. Text only, until that
+                 is worth solving properly. */
+              <Composer onSend={send} />
+            )}
+          </>
+        ) : current ? (
           <>
             <header>
               {/* Only ever visible on one column, where the list is off
@@ -803,6 +1035,33 @@ export default function App() {
           }}
         />
       )}
+      {sheet === "new-group" && (
+        <NewGroupSheet
+          contacts={contacts}
+          onClose={() => setSheet("none")}
+          onCreate={async (name, members) => {
+            const made = await onGroup(() => api.createGroup(name, members));
+            if (made) {
+              setActive(made.id);
+              setSheet("none");
+            }
+          }}
+        />
+      )}
+      {managing && (
+        <MembersSheet
+          group={groups.find((g) => g.id === managing.id) ?? managing}
+          contacts={contacts}
+          onClose={() => setManaging(null)}
+          onAdd={(account) =>
+            void onGroup(() => api.addToGroup(managing.id, account))
+          }
+          onRemove={(account) =>
+            void onGroup(() => api.removeFromGroup(managing.id, account))
+          }
+          onLeave={() => void onGroup(() => api.leaveGroup(managing.id))}
+        />
+      )}
       {sheet === "history" && (
         <HistorySheet
           onClose={() => setSheet("none")}
@@ -825,7 +1084,13 @@ export default function App() {
 
       {renaming && (
         <RenameSheet
-          what={renaming.kind === "device" ? "this device" : "this contact"}
+          what={
+            renaming.kind === "device"
+              ? "this device"
+              : renaming.kind === "group"
+                ? "this group, for everybody in it"
+                : "this contact"
+          }
           current={renaming.current}
           onClose={() => setRenaming(null)}
           onSave={rename}
@@ -1240,7 +1505,8 @@ function Composer({
   onSendFile,
 }: {
   onSend: (text: string) => void;
-  onSendFile: (file: File) => void;
+  /** Absent in a group, where one file would be sent once per member device. */
+  onSendFile?: (file: File) => void;
 }) {
   const [text, setText] = useState("");
   const picker = useRef<HTMLInputElement>(null);
@@ -1270,25 +1536,29 @@ function Composer({
       {/* The picker lives in the page rather than in a native dialog, which is
           what keeps the app's capability list empty: no filesystem plugin, no
           permission to read a path Vega was not handed. */}
-      <input
-        ref={picker}
-        type="file"
-        hidden
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file) onSendFile(file);
-          // Cleared so picking the same file twice in a row still fires.
-          e.target.value = "";
-        }}
-      />
-      <button
-        className="icon attach"
-        title="Send a file"
-        aria-label="Send a file"
-        onClick={() => picker.current?.click()}
-      >
-        ＋
-      </button>
+      {onSendFile && (
+        <>
+          <input
+            ref={picker}
+            type="file"
+            hidden
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) onSendFile(file);
+              // Cleared so picking the same file twice in a row still fires.
+              e.target.value = "";
+            }}
+          />
+          <button
+            className="icon attach"
+            title="Send a file"
+            aria-label="Send a file"
+            onClick={() => picker.current?.click()}
+          >
+            ＋
+          </button>
+        </>
+      )}
       <textarea
         ref={box}
         value={text}
@@ -1529,6 +1799,232 @@ function HistorySheet({
               Clear everything
             </button>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Make a group.
+ *
+ * Only contacts can be picked, and that is the whole trust model showing
+ * through: there is no directory, so a group is a list of people you have
+ * already exchanged invites with. Everybody chosen is told the moment this is
+ * confirmed — there is nothing to accept, because there is no server to hold an
+ * invitation.
+ */
+function NewGroupSheet({
+  contacts,
+  onClose,
+  onCreate,
+}: {
+  contacts: Contact[];
+  onClose: () => void;
+  onCreate: (name: string, members: string[]) => void;
+}) {
+  const [name, setName] = useState("");
+  const [picked, setPicked] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  const toggle = (id: string) =>
+    setPicked((was) =>
+      was.includes(id) ? was.filter((x) => x !== id) : [...was, id],
+    );
+
+  // The cap counts you as well, which is why it is one fewer here.
+  const full = picked.length >= MAX_GROUP_MEMBERS - 1;
+  const ready = name.trim().length > 0 && picked.length > 0 && !busy;
+
+  return (
+    <div className="sheet" onClick={onClose}>
+      <div className="panel" onClick={(e) => e.stopPropagation()}>
+        <h2>New group</h2>
+        <p>
+          Everyone you pick is told about the group straight away. There is no
+          invitation to accept and no server holding one — the same way adding a
+          contact works.
+        </p>
+
+        <input
+          value={name}
+          placeholder="Group name"
+          autoFocus
+          maxLength={128}
+          onChange={(e) => setName(e.target.value)}
+        />
+
+        <div className="picker">
+          {contacts.map((c) => (
+            <button
+              key={c.account_id}
+              className="pick"
+              aria-pressed={picked.includes(c.account_id)}
+              disabled={full && !picked.includes(c.account_id)}
+              onClick={() => toggle(c.account_id)}
+            >
+              <Avatar id={c.account_id} name={c.display_name} />
+              <span className="contact-text">
+                <span className="name">{c.display_name || "unnamed"}</span>
+                <span className="sub">{c.short_id}</span>
+              </span>
+              <span className="tick" aria-hidden="true">
+                {picked.includes(c.account_id) ? "✓" : ""}
+              </span>
+            </button>
+          ))}
+        </div>
+
+        <p>
+          {picked.length} chosen, and you. At most {MAX_GROUP_MEMBERS} in a
+          group: every message is sent once to each member&apos;s device, so a
+          large group is a lot of traffic from whoever is typing.
+        </p>
+
+        <div className="row">
+          <button onClick={onClose}>Cancel</button>
+          <button
+            className="primary"
+            disabled={!ready}
+            onClick={() => {
+              setBusy(true);
+              onCreate(name.trim(), picked);
+            }}
+          >
+            Create
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Who is in a group, and the ways it can change.
+ *
+ * The buttons only appear for whoever made the group. That is not an interface
+ * decision — the Rust side refuses a membership change from anybody else, for
+ * the plain reason that with no server there is nothing to decide between two
+ * people editing the list at once.
+ */
+function MembersSheet({
+  group,
+  contacts,
+  onClose,
+  onAdd,
+  onRemove,
+  onLeave,
+}: {
+  group: Group;
+  contacts: Contact[];
+  onClose: () => void;
+  onAdd: (account: string) => void;
+  onRemove: (account: string) => void;
+  onLeave: () => void;
+}) {
+  const [adding, setAdding] = useState(false);
+  const outside = contacts.filter(
+    (c) => !group.members.some((m) => m.account_id === c.account_id),
+  );
+  const stranded = group.members.filter((m) => m.unreachable);
+
+  return (
+    <div className="sheet" onClick={onClose}>
+      <div className="panel" onClick={(e) => e.stopPropagation()}>
+        <h2>{group.name}</h2>
+        <p>
+          {group.mine
+            ? "You made this group, so you are the only one who can change who is in it."
+            : "Only whoever made this group can change who is in it. You can leave."}
+        </p>
+
+        <div className="picker">
+          {group.members.map((m) => (
+            <div key={m.account_id} className="pick" data-static="true">
+              <Avatar id={m.account_id} name={m.display_name} />
+              <span className="contact-text">
+                <span className="name">
+                  {m.display_name}
+                  {m.account_id === group.creator && (
+                    <span className="check" title="Made this group">
+                      ★
+                    </span>
+                  )}
+                </span>
+                <span className="sub">
+                  {m.unreachable
+                    ? "not one of your contacts"
+                    : m.account_id.slice(0, 9)}
+                </span>
+              </span>
+              {group.mine && !m.self_ && (
+                <button
+                  className="icon"
+                  title="Remove from this group"
+                  aria-label={`Remove ${m.display_name}`}
+                  onClick={() => onRemove(m.account_id)}
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {stranded.length > 0 && (
+          <p className="warn">
+            {stranded.length === 1
+              ? "One member is"
+              : `${stranded.length} members are`}{" "}
+            not in your contacts. You cannot send to them and they will not see
+            what you write — but they are in the group, and they can read
+            whatever the others send. Exchange invites to reach them.
+          </p>
+        )}
+
+        {group.mine && !group.departed && outside.length > 0 && (
+          <>
+            {adding ? (
+              <div className="picker">
+                {outside.map((c) => (
+                  <button
+                    key={c.account_id}
+                    className="pick"
+                    onClick={() => {
+                      onAdd(c.account_id);
+                      setAdding(false);
+                    }}
+                  >
+                    <Avatar id={c.account_id} name={c.display_name} />
+                    <span className="contact-text">
+                      <span className="name">
+                        {c.display_name || "unnamed"}
+                      </span>
+                      <span className="sub">{c.short_id}</span>
+                    </span>
+                    <span className="tick" aria-hidden="true">
+                      ＋
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="row">
+                <button onClick={() => setAdding(true)}>Add somebody…</button>
+              </div>
+            )}
+          </>
+        )}
+
+        <div className="row">
+          {!group.mine && !group.departed && (
+            <button className="danger" onClick={onLeave}>
+              Leave group
+            </button>
+          )}
+          <button className="primary" onClick={onClose}>
+            Done
+          </button>
         </div>
       </div>
     </div>

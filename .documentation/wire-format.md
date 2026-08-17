@@ -130,12 +130,52 @@ server: it rides inside the ratchet, so it is private and authenticated.
 { "type": "self_copy", "to": "a1b2…", "message_id": "7a8b…", "text": "…" }
 { "type": "file",       "file": { … } }
 { "type": "file_chunk", "file": { … }, "index": 0, "data": "base64" }
+{ "type": "group_text", "group": "9f0e…", "text": "…" }
+{ "type": "group_op",   "op": { … } }
 ```
 
 `self_copy` is how multi-device sync works without a server — a copy of an
 outgoing message addressed to the sender's own devices. **Only accepted when the
 authenticated sender is your own account**; otherwise a contact could plant
 messages among the things you said.
+
+### Groups
+
+A group message is an ordinary message sent once per member device. There is no
+group key and no group routing tag: the transport is pairwise, so a group of
+eight is eight sends, and every one of them keeps the forward secrecy and
+post-compromise security the ratchet already provides.
+
+```json
+"op": {
+  "group":   "9f0e…",     // 32 random bytes, hex — chosen once by the creator
+  "epoch":   3,           // increments on every accepted change; decides what is newer
+  "name":    "Trip",
+  "creator": "a1b2…",     // fixed at creation, checked on every op after it
+  "members": ["a1b2…"],   // the FULL resulting list, not a delta
+  "change":  { "type": "added", "who": "c3d4…" }   // for display only
+}
+```
+
+An op carries the whole resulting state, so it is idempotent and order-tolerant:
+a member who missed three changes and receives only the fourth lands on the same
+membership as everyone else. `change` is what the interface shows and is never
+used to decide anything.
+
+**Who may send one.** Only the creator may add, remove or rename. Anyone may
+leave, and a `left` op is accepted only from the person leaving, only about
+themselves, and only if it leaves the rest of the roster alone. The creator
+cannot leave — a group with no one able to change it would be stuck.
+
+**`group_text` is only filed under the group once the authenticated sender is
+found in our own copy of the membership.** The group id is a sender-chosen
+field, exactly like `conversation`, and believing it unchecked would let any
+contact who learned the id drop messages into that thread.
+
+What this does *not* defend against: a creator who describes the group
+differently to different members. There is no shared transcript to compare, and
+building one without a server is the hard part of group messaging rather than an
+omission. See `.documentation/threat-model.md`.
 
 ### Files
 

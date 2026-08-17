@@ -14,8 +14,8 @@ use crate::invite::Invite;
 use std::collections::{HashMap, HashSet};
 use vega_core::session::Directory;
 use vega_core::{
-    envelope::Body, fan_out, AccountId, ChainState, Content, Envelope, Identity, Recipient,
-    Sessions, Sigchain, Store,
+    envelope::Body, fan_out, fan_out_to, AccountId, ChainState, Content, Conversation, Envelope,
+    Group, GroupId, GroupOp, Identity, Recipient, Sessions, Sigchain, Store,
 };
 use vega_net::{AddressRecord, Multiaddr, NetEvent, PeerId};
 
@@ -85,11 +85,13 @@ impl Directory for StoreDirectory<'_> {
 
 /// What happened to one received envelope.
 pub enum Received {
-    /// A message worth showing. Carries the conversation it belongs to.
-    Message(AccountId),
+    /// A message worth showing. Carries the conversation it belongs to — a
+    /// contact for a one-to-one message, a group for a group one.
+    Message(Conversation),
     /// The last chunk of a file arrived and the whole thing checked out. The
     /// caller writes it to disk — this module deals in bytes, not paths.
     File {
+        /// Files are one-to-one only, so this is always a contact.
         conversation: AccountId,
         transfer: [u8; 32],
         name: String,
@@ -284,6 +286,320 @@ impl Runtime {
         Ok((contact, state, pairwise))
     }
 
+    // ---- groups ------------------------------------------------------------
+
+    /// Everything needed to address one member, skipping the ones we cannot.
+    ///
+    /// A group may name somebody we have never exchanged an invite with — the
+    /// creator knows them, we do not. There is no way to message such a person
+    /// and no server to ask, so they are reported and skipped rather than
+    /// failing the send for everybody else. The UI shows who they are.
+    fn group_recipients(
+        &self,
+        members: &[AccountId],
+    ) -> (
+        Vec<(AccountId, ChainState, vega_core::Pairwise)>,
+        Vec<AccountId>,
+    ) {
+        let mut reachable = Vec::new();
+        let mut unreachable = Vec::new();
+
+        for member in members {
+            if *member == self.identity.account_id {
+                // My own account: my other devices, addressed with the
+                // self-pairwise secret the same way a self-copy is.
+                match self.chain.validate() {
+                    Ok(state) => {
+                        let pairwise = self
+                            .identity
+                            .pairwise_with(&state.contact, &self.identity.account_id);
+                        reachable.push((*member, state, pairwise));
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "own chain does not validate");
+                        unreachable.push(*member);
+                    }
+                }
+                continue;
+            }
+            match self.address(member) {
+                Ok((_, state, pairwise)) => reachable.push((*member, state, pairwise)),
+                Err(_) => unreachable.push(*member),
+            }
+        }
+        (reachable, unreachable)
+    }
+
+    /// Encrypt one body to every member of a group and queue it.
+    ///
+    /// Returns the members it could not be addressed to.
+    fn send_to_group(
+        &mut self,
+        members: &[AccountId],
+        conversation: Conversation,
+        body: Body,
+        store_it: bool,
+    ) -> vega_core::Result<Vec<AccountId>> {
+        let now = vega_core::now();
+        let (reachable, mut unreachable) = self.group_recipients(members);
+
+        // `conversation` on the content is the addressing hint a one-to-one
+        // message uses; for a group the id inside the body is what decides the
+        // thread, and every recipient checks it against their own membership.
+        let content = Content::new(
+            self.identity.account_id,
+            now,
+            self.store.next_message_seq()?,
+            body,
+        );
+        let message_id = content.id;
+
+        let recipients: Vec<Recipient<'_>> = reachable
+            .iter()
+            .map(|(account, state, pairwise)| Recipient {
+                account: *account,
+                state,
+                pairwise,
+            })
+            .collect();
+
+        let (envelopes, failed) = fan_out_to(
+            &mut self.identity,
+            &mut self.sessions,
+            &recipients,
+            &content,
+            now,
+        );
+        for (account, e) in failed {
+            tracing::warn!(member = %account, error = %e, "could not address a group member");
+            if !unreachable.contains(&account) {
+                unreachable.push(account);
+            }
+        }
+
+        // Stored before anything touches the network, exactly as a one-to-one
+        // message is: a message is not lost because delivery failed.
+        if store_it {
+            self.store.append_message(&vega_core::StoredMessage {
+                seq: self.store.next_message_seq()?,
+                conversation,
+                from_account: self.identity.account_id,
+                from_device: self.identity.device_id,
+                outgoing: true,
+                received_at: now,
+                content,
+            })?;
+        }
+
+        for (account, device, envelope) in envelopes {
+            self.store.queue(&vega_core::OutboxItem {
+                seq: self.store.next_outbox_seq()?,
+                to_account: account,
+                to_device: device,
+                envelope: envelope.to_bytes()?,
+                queued_at: now,
+                attempts: 0,
+                message_id,
+            })?;
+        }
+
+        self.persist()?;
+        Ok(unreachable)
+    }
+
+    /// Start a group and tell everyone in it.
+    pub fn create_group(
+        &mut self,
+        name: &str,
+        members: &[AccountId],
+    ) -> vega_core::Result<(GroupId, Vec<AccountId>)> {
+        let now = vega_core::now();
+        let (group, op) = Group::create(name, self.identity.account_id, members, now)?;
+        self.store.put_group(&group)?;
+
+        let unreachable = self.send_to_group(
+            &group.members,
+            Conversation::Group(group.id),
+            Body::GroupOp { op },
+            false,
+        )?;
+        Ok((group.id, unreachable))
+    }
+
+    /// Apply one of my own membership changes and broadcast it.
+    ///
+    /// The op goes to the members *after* the change and to anyone dropped by
+    /// it, because being removed is something a person should be told rather
+    /// than left to infer from silence.
+    fn apply_and_broadcast(
+        &mut self,
+        mut group: Group,
+        op: GroupOp,
+    ) -> vega_core::Result<Vec<AccountId>> {
+        let me = self.identity.account_id;
+        let before = group.members.clone();
+        group.apply(&op, me, me)?;
+        self.store.put_group(&group)?;
+
+        let mut audience = group.members.clone();
+        for gone in before {
+            if !audience.contains(&gone) {
+                audience.push(gone);
+            }
+        }
+        self.send_to_group(
+            &audience,
+            Conversation::Group(group.id),
+            Body::GroupOp { op },
+            false,
+        )
+    }
+
+    pub fn add_to_group(
+        &mut self,
+        group: &GroupId,
+        who: AccountId,
+    ) -> vega_core::Result<Vec<AccountId>> {
+        let group = self.group(group)?;
+        let op = group.add(who)?;
+        self.apply_and_broadcast(group, op)
+    }
+
+    pub fn remove_from_group(
+        &mut self,
+        group: &GroupId,
+        who: AccountId,
+    ) -> vega_core::Result<Vec<AccountId>> {
+        let group = self.group(group)?;
+        let op = group.remove(who)?;
+        self.apply_and_broadcast(group, op)
+    }
+
+    pub fn rename_group(
+        &mut self,
+        group: &GroupId,
+        name: &str,
+    ) -> vega_core::Result<Vec<AccountId>> {
+        let group = self.group(group)?;
+        let op = group.rename(name)?;
+        self.apply_and_broadcast(group, op)
+    }
+
+    pub fn leave_group(&mut self, group: &GroupId) -> vega_core::Result<Vec<AccountId>> {
+        let group = self.group(group)?;
+        let op = group.leave(self.identity.account_id)?;
+        self.apply_and_broadcast(group, op)
+    }
+
+    /// Send a message to a group. Returns the members it could not reach.
+    pub fn send_group_text(
+        &mut self,
+        group: &GroupId,
+        text: &str,
+    ) -> vega_core::Result<Vec<AccountId>> {
+        let group = self.group(group)?;
+        if group.departed {
+            return Err(vega_core::Error::Wire(
+                "you are no longer in this group".into(),
+            ));
+        }
+        let members = group.others(&self.identity.account_id);
+        self.send_to_group(
+            &members,
+            Conversation::Group(group.id),
+            Body::GroupText {
+                group: group.id,
+                text: text.into(),
+            },
+            true,
+        )
+    }
+
+    /// Take in a membership change somebody else made.
+    ///
+    /// The sender is already authenticated — `receive` refuses anything from an
+    /// account whose signed chain does not vouch for the sending device, and an
+    /// account we have no chain for is a stranger whose messages never get this
+    /// far. So "is this person allowed to say this?" is all that is left, and
+    /// that lives in `vega_core::group`.
+    fn absorb_group_op(&mut self, op: &GroupOp, from: AccountId, now: u64) {
+        let me = self.identity.account_id;
+
+        let existing = match self.store.get_group(&op.group) {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read a group");
+                return;
+            }
+        };
+
+        let updated = match existing {
+            Some(mut group) => match group.apply(op, from, me) {
+                Ok(true) => group,
+                // Stale or already applied: ordinary on a network that delivers
+                // the same op over two tiers.
+                Ok(false) => return,
+                Err(e) => {
+                    tracing::warn!(
+                        from = %from,
+                        group = %op.group.short(),
+                        error = %e,
+                        "refused a group change"
+                    );
+                    return;
+                }
+            },
+            // A group we have never heard of. Being added to one is how this
+            // normally happens, and it is the sender's own contact status that
+            // makes it safe to accept at all — but a contact can mint these,
+            // and nothing about a group needs our agreement, so the count one
+            // account may create here is bounded like everything else they
+            // control.
+            None if self.groups_created_by(&from) >= vega_core::MAX_GROUPS_PER_CREATOR => {
+                tracing::warn!(
+                    from = %from,
+                    "refused a new group: that contact has created too many"
+                );
+                return;
+            }
+            None => match Group::from_op(op, from, me, now) {
+                Ok(group) => {
+                    tracing::info!(
+                        group = %group.id.short(),
+                        name = %group.name,
+                        from = %from,
+                        "added to a group"
+                    );
+                    group
+                }
+                Err(e) => {
+                    tracing::warn!(from = %from, error = %e, "refused a group introduction");
+                    return;
+                }
+            },
+        };
+
+        if let Err(e) = self.store.put_group(&updated) {
+            tracing::warn!(error = %e, "could not store a group");
+        }
+    }
+
+    /// How many groups this account has already created on this device.
+    fn groups_created_by(&self, creator: &AccountId) -> usize {
+        self.store
+            .list_groups()
+            .map(|groups| groups.iter().filter(|g| g.creator == *creator).count())
+            // Unreadable is not "none": treating a failed read as zero would
+            // turn a storage fault into an unbounded write path.
+            .unwrap_or(usize::MAX)
+    }
+
+    fn group(&self, id: &GroupId) -> vega_core::Result<Group> {
+        self.store
+            .get_group(id)?
+            .ok_or_else(|| vega_core::Error::Wire(format!("no such group: {}", id.short())))
+    }
+
     /// Encrypt a message to a contact and queue it for delivery.
     pub fn send_text(&mut self, to: &AccountId, text: &str) -> vega_core::Result<()> {
         let (contact, their_state, pairwise) = self.address(to)?;
@@ -334,7 +650,7 @@ impl Runtime {
         // is never lost because delivery happened to fail.
         self.store.append_message(&vega_core::StoredMessage {
             seq: self.store.next_message_seq()?,
-            conversation: *to,
+            conversation: Conversation::Direct(*to),
             from_account: me,
             from_device: my_device,
             outgoing: true,
@@ -452,7 +768,7 @@ impl Runtime {
         // own thread whether or not delivery ever succeeds.
         self.store.append_message(&vega_core::StoredMessage {
             seq: self.store.next_message_seq()?,
-            conversation: *to,
+            conversation: Conversation::Direct(*to),
             from_account: self.identity.account_id,
             from_device: self.identity.device_id,
             outgoing: true,
@@ -554,7 +870,64 @@ impl Runtime {
             // `content.conversation` is the recipient from the sender's point of
             // view, so trusting it would both misfile every incoming message and
             // let a contact drop messages into a conversation with someone else.
-            Body::Text { .. } => (opened.from_account, false),
+            Body::Text { .. } => (Conversation::Direct(opened.from_account), false),
+
+            // A group id *is* sender-chosen, so it gets the same treatment the
+            // conversation field gets: it is only believed once our own copy of
+            // the group says this sender is in it. Without that check any
+            // contact could drop messages into any thread whose id they learned.
+            Body::GroupText { group, .. } => {
+                match self.store.get_group(group) {
+                    // Left, or removed. The others may still be talking; it is
+                    // no longer a thread we are in, and storing what is said in
+                    // it would be both a surprise and somewhere to write
+                    // without limit.
+                    Ok(Some(state)) if state.departed => {
+                        tracing::debug!(
+                            group = %group.short(),
+                            "a message for a group we have left"
+                        );
+                        return Received::NotOurs;
+                    }
+                    Ok(Some(state)) if state.is_member(&opened.from_account) => {}
+                    Ok(Some(_)) => {
+                        tracing::warn!(
+                            from = %opened.from_account,
+                            group = %group.short(),
+                            "discarded a group message from a non-member"
+                        );
+                        return Received::NotOurs;
+                    }
+                    // A group we have never been told about. The op that would
+                    // introduce it either has not arrived yet or never will.
+                    Ok(None) => {
+                        tracing::debug!(
+                            from = %opened.from_account,
+                            group = %group.short(),
+                            "a message for a group we do not have"
+                        );
+                        return Received::NotOurs;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not read a group");
+                        return Received::Housekeeping;
+                    }
+                }
+                (
+                    Conversation::Group(*group),
+                    opened.from_account == self.identity.account_id,
+                )
+            }
+
+            // Membership. Authorisation lives in `vega_core::group`; what this
+            // decides is only whether the op may create a group we do not yet
+            // have, which is the one case where there is no prior state to
+            // check it against.
+            Body::GroupOp { op } => {
+                self.absorb_group_op(op, opened.from_account, now);
+                let _ = self.persist();
+                return Received::Housekeeping;
+            }
 
             // Only my own devices may claim to be echoing something I sent.
             // Without this a contact could plant messages in my outgoing column.
@@ -566,7 +939,7 @@ impl Runtime {
                     );
                     return Received::NotOurs;
                 }
-                (*to, true)
+                (Conversation::Direct(*to), true)
             }
 
             // The only signal that actually means *delivered*. A peer accepting
@@ -598,7 +971,7 @@ impl Runtime {
                     tracing::warn!(from = %opened.from_account, error = %e, "refused a file manifest");
                     return Received::Housekeeping;
                 }
-                (opened.from_account, false)
+                (Conversation::Direct(opened.from_account), false)
             }
 
             // Chunks are not messages: not stored as one, not shown, not
@@ -993,7 +1366,7 @@ mod tests {
         // And it shows in the thread as one file message.
         let thread = bob
             .store
-            .conversation(&alice.identity.account_id, 10)
+            .conversation(&alice.identity.account_id.into(), 10)
             .unwrap();
         assert_eq!(thread.len(), 1);
         let manifest = thread[0].content.file().expect("a file message");
@@ -1032,7 +1405,7 @@ mod tests {
         // leave it looking like it is still coming in.
         let thread = bob
             .store
-            .conversation(&alice.identity.account_id, 10)
+            .conversation(&alice.identity.account_id.into(), 10)
             .unwrap();
         assert_eq!(thread.len(), 1);
         let manifest = thread[0].content.file().unwrap();
@@ -1092,10 +1465,355 @@ mod tests {
         assert!(
             alice
                 .store
-                .conversation(&bob.identity.account_id, 10)
+                .conversation(&bob.identity.account_id.into(), 10)
                 .unwrap()
                 .is_empty(),
             "and nothing in the thread"
+        );
+    }
+
+    // ---- groups ---------------------------------------------------------
+
+    /// Three runtimes who have all exchanged invites and all have live sessions.
+    ///
+    /// The warm-up round is not decoration. Two senders opening a *first*
+    /// session with the same third party can pick the same published one-time
+    /// key — one chance in however many are published, which is the residual
+    /// documented on `Sessions::establish` — and the loser's message never
+    /// opens. That is real behaviour worth knowing about, and it is not what any
+    /// group test here is about; a suite that fails one run in fifty teaches
+    /// people to re-run it rather than to read it. So every pair exchanges one
+    /// message up front, and a draw where that does not work is discarded.
+    fn trio() -> (
+        (Runtime, tempfile::TempDir),
+        (Runtime, tempfile::TempDir),
+        (Runtime, tempfile::TempDir),
+    ) {
+        for _ in 0..32 {
+            let (mut alice, a) = runtime("alice-laptop");
+            let (mut bob, b) = runtime("bob-laptop");
+            let (mut carol, c) = runtime("carol-laptop");
+            introduce(&mut alice, &mut bob);
+            introduce(&mut alice, &mut carol);
+            introduce(&mut bob, &mut carol);
+
+            if warm_up(&mut [&mut alice, &mut bob, &mut carol]) {
+                return ((alice, a), (bob, b), (carol, c));
+            }
+        }
+        panic!("could not build three runtimes with sessions in every direction");
+    }
+
+    /// One message each way between every pair, delivered and cleared.
+    ///
+    /// Returns false if any of them failed to arrive, which is the prekey
+    /// collision above and means this draw of identities should be thrown away.
+    fn warm_up(peers: &mut [&mut Runtime]) -> bool {
+        for from in 0..peers.len() {
+            for to in 0..peers.len() {
+                if from == to {
+                    continue;
+                }
+                let target = peers[to].identity.account_id;
+                if peers[from].send_text(&target, "hello").is_err() {
+                    return false;
+                }
+
+                let envelopes = queued(peers[from]);
+                let seqs: Vec<u64> = peers[from]
+                    .store
+                    .pending()
+                    .unwrap()
+                    .iter()
+                    .map(|i| i.seq)
+                    .collect();
+                peers[from].mark_delivered(&seqs);
+
+                let mut landed = false;
+                for envelope in &envelopes {
+                    if matches!(peers[to].receive(envelope), Received::Message(_)) {
+                        landed = true;
+                    }
+                }
+                if !landed {
+                    return false;
+                }
+                // The receipt the arrival queued is not part of any test.
+                let seqs: Vec<u64> = peers[to]
+                    .store
+                    .pending()
+                    .unwrap()
+                    .iter()
+                    .map(|i| i.seq)
+                    .collect();
+                peers[to].mark_delivered(&seqs);
+            }
+        }
+        true
+    }
+
+    /// Hand everything one runtime has queued to the others, and clear it.
+    fn deliver_all(from: &mut Runtime, to: &mut [&mut Runtime]) {
+        for envelope in queued(from) {
+            for peer in to.iter_mut() {
+                peer.receive(&envelope);
+            }
+        }
+        let seqs: Vec<u64> = from
+            .store
+            .pending()
+            .unwrap()
+            .iter()
+            .map(|i| i.seq)
+            .collect();
+        from.mark_delivered(&seqs);
+    }
+
+    #[test]
+    fn a_group_message_reaches_every_member() {
+        let ((mut alice, _a), (mut bob, _b), (mut carol, _c)) = trio();
+
+        let (group, unreachable) = alice
+            .create_group(
+                "Trip",
+                &[bob.identity.account_id, carol.identity.account_id],
+            )
+            .unwrap();
+        assert!(unreachable.is_empty(), "everybody is a contact");
+        deliver_all(&mut alice, &mut [&mut bob, &mut carol]);
+
+        // Both were told about the group by the op alone.
+        assert_eq!(bob.store.get_group(&group).unwrap().unwrap().name, "Trip");
+        assert_eq!(
+            carol
+                .store
+                .get_group(&group)
+                .unwrap()
+                .unwrap()
+                .members
+                .len(),
+            3
+        );
+
+        alice.send_group_text(&group, "we leave at six").unwrap();
+        deliver_all(&mut alice, &mut [&mut bob, &mut carol]);
+
+        for peer in [&bob, &carol] {
+            let thread = peer
+                .store
+                .conversation(&Conversation::Group(group), 10)
+                .unwrap();
+            assert_eq!(thread.len(), 1, "one message, filed under the group");
+            assert_eq!(thread[0].content.text(), Some("we leave at six"));
+            assert!(!thread[0].outgoing);
+        }
+
+        // And the sender has their own copy, filed the same way.
+        let mine = alice
+            .store
+            .conversation(&Conversation::Group(group), 10)
+            .unwrap();
+        assert_eq!(mine.len(), 1);
+        assert!(mine[0].outgoing);
+    }
+
+    #[test]
+    fn a_contact_cannot_post_to_a_group_they_are_not_in() {
+        let ((mut alice, _a), (mut bob, _b), (mut carol, _c)) = trio();
+
+        // Alice and Bob only. Carol is a contact of both, and not a member.
+        let (group, _) = alice
+            .create_group("Trip", &[bob.identity.account_id])
+            .unwrap();
+        deliver_all(&mut alice, &mut [&mut bob, &mut carol]);
+        assert!(
+            carol.store.get_group(&group).unwrap().is_none(),
+            "an op naming somebody else's group is not theirs to keep"
+        );
+
+        // Carol learns the id anyway — it is in every op Alice sent Bob — and
+        // writes to it directly.
+        let content = Content::new(
+            bob.identity.account_id,
+            vega_core::now(),
+            1,
+            Body::GroupText {
+                group,
+                text: "let me in".into(),
+            },
+        );
+        let (their_contact, state, pairwise) = carol.address(&bob.identity.account_id).unwrap();
+        let _ = their_contact;
+        let (envelopes, _) = fan_out_to(
+            &mut carol.identity,
+            &mut carol.sessions,
+            &[Recipient {
+                account: bob.identity.account_id,
+                state: &state,
+                pairwise: &pairwise,
+            }],
+            &content,
+            vega_core::now(),
+        );
+        assert!(!envelopes.is_empty());
+
+        for (_, _, envelope) in envelopes {
+            bob.receive(&envelope.to_bytes().unwrap());
+        }
+        assert!(
+            bob.store
+                .conversation(&Conversation::Group(group), 10)
+                .unwrap()
+                .is_empty(),
+            "a non-member's message must not land in the thread"
+        );
+    }
+
+    #[test]
+    fn only_the_creator_may_change_the_membership() {
+        let ((mut alice, _a), (mut bob, _b), (mut carol, _c)) = trio();
+
+        let (group, _) = alice
+            .create_group(
+                "Trip",
+                &[bob.identity.account_id, carol.identity.account_id],
+            )
+            .unwrap();
+        deliver_all(&mut alice, &mut [&mut bob, &mut carol]);
+
+        // Bob tries to throw Carol out.
+        assert!(
+            bob.remove_from_group(&group, carol.identity.account_id)
+                .is_err(),
+            "a member is not an admin"
+        );
+
+        // Alice does, and it takes everywhere.
+        alice
+            .remove_from_group(&group, carol.identity.account_id)
+            .unwrap();
+        deliver_all(&mut alice, &mut [&mut bob, &mut carol]);
+
+        assert_eq!(
+            bob.store.get_group(&group).unwrap().unwrap().members.len(),
+            2
+        );
+        // Carol is told, rather than left to infer it from silence.
+        let hers = carol.store.get_group(&group).unwrap().unwrap();
+        assert!(hers.departed);
+        assert!(carol.send_group_text(&group, "wait").is_err());
+    }
+
+    #[test]
+    fn leaving_tells_the_others() {
+        let ((mut alice, _a), (mut bob, _b), (mut carol, _c)) = trio();
+
+        let (group, _) = alice
+            .create_group(
+                "Trip",
+                &[bob.identity.account_id, carol.identity.account_id],
+            )
+            .unwrap();
+        deliver_all(&mut alice, &mut [&mut bob, &mut carol]);
+
+        bob.leave_group(&group).unwrap();
+        deliver_all(&mut bob, &mut [&mut alice, &mut carol]);
+
+        assert!(bob.store.get_group(&group).unwrap().unwrap().departed);
+        for peer in [&alice, &carol] {
+            let g = peer.store.get_group(&group).unwrap().unwrap();
+            assert!(!g.is_member(&bob.identity.account_id));
+            assert!(!g.departed, "the others are still in it");
+        }
+    }
+
+    #[test]
+    fn a_group_message_skips_a_member_who_is_not_a_contact() {
+        let ((mut alice, _a), (mut bob, _b), (mut carol, _c)) = trio();
+
+        // Alice makes a group, then Carol drops out of Bob's contacts — the
+        // shape of "the creator knows them, I do not".
+        let (group, _) = alice
+            .create_group(
+                "Trip",
+                &[bob.identity.account_id, carol.identity.account_id],
+            )
+            .unwrap();
+        deliver_all(&mut alice, &mut [&mut bob, &mut carol]);
+
+        let (mut stranger, _s) = runtime("dave-laptop");
+        let dave = stranger.identity.account_id;
+        // Alice adds Dave, whom Bob has never met.
+        let from_dave = stranger.my_invite("dave").unwrap();
+        alice.add_contact(&from_dave).unwrap();
+        let from_alice = alice.my_invite("alice").unwrap();
+        stranger.add_contact(&from_alice).unwrap();
+
+        alice.add_to_group(&group, dave).unwrap();
+        deliver_all(&mut alice, &mut [&mut bob, &mut carol, &mut stranger]);
+
+        // Bob can still talk to the group; Dave is reported, not fatal.
+        let unreachable = bob.send_group_text(&group, "who is dave").unwrap();
+        assert_eq!(unreachable, vec![dave]);
+        deliver_all(&mut bob, &mut [&mut alice, &mut carol]);
+        assert_eq!(
+            alice
+                .store
+                .conversation(&Conversation::Group(group), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_contact_cannot_fill_the_store_with_groups() {
+        let ((mut alice, _a), (mut bob, _b), _c) = trio();
+
+        // Alice mints groups naming Bob, who never agreed to any of them —
+        // being added is the whole of the notification.
+        for i in 0..vega_core::MAX_GROUPS_PER_CREATOR + 8 {
+            alice
+                .create_group(&format!("Trip {i}"), &[bob.identity.account_id])
+                .unwrap();
+            deliver_all(&mut alice, &mut [&mut bob]);
+        }
+
+        assert_eq!(
+            bob.store.list_groups().unwrap().len(),
+            vega_core::MAX_GROUPS_PER_CREATOR,
+            "one contact's groups have to be bounded like everything else they control"
+        );
+    }
+
+    #[test]
+    fn a_group_we_left_stops_accepting_messages() {
+        let ((mut alice, _a), (mut bob, _b), (mut carol, _c)) = trio();
+
+        let (group, _) = alice
+            .create_group(
+                "Trip",
+                &[bob.identity.account_id, carol.identity.account_id],
+            )
+            .unwrap();
+        deliver_all(&mut alice, &mut [&mut bob, &mut carol]);
+
+        bob.leave_group(&group).unwrap();
+        deliver_all(&mut bob, &mut [&mut alice, &mut carol]);
+
+        // Alice has not applied Bob's departure yet from Bob's point of view —
+        // she carries on talking to the group as she knew it.
+        alice.send_group_text(&group, "still here?").unwrap();
+        for envelope in queued(&alice) {
+            bob.receive(&envelope);
+        }
+
+        assert!(
+            bob.store
+                .conversation(&Conversation::Group(group), 10)
+                .unwrap()
+                .is_empty(),
+            "a thread we left must not keep filling up"
         );
     }
 }

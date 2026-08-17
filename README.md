@@ -30,9 +30,16 @@ whatever you are reading this on. Everything is also here:
 means a review queue, a developer account tied to a legal identity, and a
 company whose rules can change under a messenger whose whole point is that no
 third party sits in the middle. Open the `.apk` on the phone and allow the
-install when asked; one file carries all three phone architectures. Delivery
-there happens only while the app is open until the foreground service is written
-— see [`.documentation/android.md`](.documentation/android.md).
+install when asked; one file carries all three phone architectures.
+
+**Delivery there happens only while the app is open.** The foreground service
+that would hold the socket in the background is not written yet. When it is,
+delivery with the screen off will be *bursty* rather than immediate: Doze
+suspends network access for any app not exempted from it, and a foreground
+service does not buy that exemption — only the user can, with one prompt. The
+alternative is a push service, which is the third party this project exists
+without. [`.documentation/android.md`](.documentation/android.md) works through
+what that costs and what it takes to write.
 
 None of the builds is code-signed, so the first open will show a warning from
 the operating system.
@@ -53,10 +60,11 @@ before trusting it with anything that matters.
 ## Layout
 
 ```
-crates/vega-core   identity, sigchain, message crypto — knows nothing about networking
-crates/vega-net    the transport ladder — moves opaque bytes, cannot read them
-app/               Tauri desktop app (React frontend, Rust backend)
-app/src-tauri      the shell: commands, runtime, key storage
+crates/vega-core     identity, sigchain, groups, message crypto — knows nothing about networking
+crates/vega-net      the transport ladder — moves opaque bytes, cannot read them
+crates/vega-android  the foreground service that stops Android killing the process
+app/                 Tauri desktop app (React frontend, Rust backend)
+app/src-tauri        the shell: commands, runtime, key storage
 ```
 
 The split is load-bearing. `vega-net` handles envelopes it cannot open, which is
@@ -106,6 +114,24 @@ It prints its address. Put that in `seeds.json` in the app's data directory — 
 plain JSON array of multiaddrs — and restart. No rebuild needed. A seed holds no
 key that can read anything, and cannot withhold a message it never sees.
 
+### A group
+
+`New group` in the sidebar, once you have a contact or two. Everybody you pick
+is told immediately — there is no invitation to accept, because there is no
+server to hold one, and only people you have already exchanged invites with can
+be picked.
+
+A group message is an ordinary sealed message sent once to each member's
+device. There is no group key: the ratchet's forward secrecy and post-compromise
+security hold per member, and the price is that a group of eight is eight sends.
+Text only for the same reason — a file to eight people would be eight copies of
+the file.
+
+**Only whoever made the group can change who is in it.** Anyone can leave. With
+no server to order two people's simultaneous edits, one writer is the
+alternative to inventing a consensus protocol, and a membership list two members
+disagree about is worse than a limitation.
+
 ### A second device
 
 **By default a second device is a second account.** The first launch generates an
@@ -150,8 +176,10 @@ be worse than none.
 | Files, up to 10 MB | done, tested — sent as 96 KiB chunks, each an ordinary sealed message, reassembled and hash-checked on arrival. Not copied to the sender's own devices, and anything past ~3 MB needs both people online at once |
 | Key storage | platform keyring (Secret Service / Keychain / Credential Manager), with a 0600 file where none exists |
 | Device linking (second device on one account) | the crypto is there — `Identity::adopt`, and the sigchain accepts device-signed additions — but there is no pairing flow, so by default a second device is a second account ([what to do instead](#a-second-device)) |
-| Android | cross-compiles; foreground service and multicast lock plugins not written (see `.documentation/android.md`) |
-| Groups, T5 offline mesh | not started |
+| Android | cross-compiles and ships a signed APK; delivery only while the app is open |
+| Android background delivery | written in `crates/vega-android` — `specialUse` foreground service, Wi-Fi-tied multicast lock, battery-exemption prompt — but never run on a phone, so nothing above it has changed yet (see `.documentation/android.md`) |
+| Groups | done, tested — a group is a name and a member list, and a message to one is an ordinary sealed message per member device. No group key: the ratchet's forward secrecy and post-compromise security hold per member, and the cost is that a group of eight is eight sends. Only the creator may change the membership; anyone may leave. Text only — a file would be sent once per member device |
+| T5 offline mesh | not started, and not close. rust-libp2p has no BLE transport, so it is a custom transport plus a native plugin per platform, and BLE throughput makes it text-only |
 
 ## Security notes
 
@@ -178,8 +206,22 @@ around it has not.
   containers, and Android take the fallback path. It protects against another
   user on the machine and a stolen backup, and nothing else. The app logs which
   backing it used at startup.
-- **Android has no background delivery.** It cross-compiles; the foreground
-  service and multicast lock plugins are not written.
+- **Android has no background delivery in any released build.** A message sent
+  to a phone with Vega closed arrives the next time it is opened. The foreground
+  service and multicast lock now exist in `crates/vega-android` — a `specialUse`
+  service, which unlike `dataSync` carries no six-hour daily cap — but they have
+  never run on a phone, and until they have, this stays on the list. Even once
+  they work they cannot make delivery immediate: Doze suspends network access
+  for unexempted apps, and a foreground service is not an exemption. Bursty is
+  the ceiling unless the user turns off battery optimisation for Vega.
+- **Two people's first message to the same person can collide.** There is no
+  server to hand each sender a different one-time prekey, so both pick from the
+  same published list — spread by hashing the sender, but with a one-in-fifty
+  chance of landing on the same key. The first to arrive consumes it and the
+  second never opens, and since the outbox retries the same envelope, that
+  first message never arrives at all. It affects a first message only; an
+  established conversation is unaffected. The fix is for the sender to notice
+  and re-establish with a different prekey, which is not written.
 - **A relay can still misroute.** The routing tag is now bound into the sealed
   layer, so rewriting it is detected rather than silently obeyed — but a relay
   that drops or misdirects an envelope still denies delivery. That is inherent

@@ -374,7 +374,11 @@
         foreground service that would keep the socket alive in the background is
         not written yet, so a message sent to a phone with Vega closed arrives
         the next time it is opened rather than immediately. Everything else —
-        encryption, contacts, files — works as it does on the desktop.
+        encryption, contacts, files — works as it does on the desktop. Once that
+        service exists, delivery with the screen off will arrive in bursts
+        rather than instantly: Android suspends network access for sleeping
+        apps, and the usual way around that is a push server this project will
+        not have.
       </p>
 
       <h2>The first open will warn you</h2>

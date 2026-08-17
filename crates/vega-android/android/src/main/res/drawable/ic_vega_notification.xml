@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The mark from assets/logo/vega-mark.svg, outer shape only. A notification
+  small icon is drawn as a silhouette: every non-transparent pixel comes out the
+  system's tint colour, so the inner spark would disappear into the body
+  anyway.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M512,256A256,256 0 0 1 256,0A256,256 0 0 1 0,256A256,256 0 0 1 256,512A256,256 0 0 1 512,256Z" />
+</vector>

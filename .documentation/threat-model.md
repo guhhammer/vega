@@ -113,6 +113,34 @@ by an adversary who sees both ends works.
 later addition at a real latency cost. Until then, do not use this where being
 *seen to communicate* is the danger.
 
+### E2. Whoever made a group
+
+A group's creator says who is in it, and nothing checks that they tell everybody
+the same story. They can describe the group as {you, Bob} to you and {Bob,
+Carol} to Bob; there is no shared transcript to compare against, and building
+one without a server is the hard part of group messaging rather than something
+left out here. Treat a group's membership as *the creator's claim*, the same way
+a contact's name is your own label rather than a fact about them.
+
+What is enforced, because it needs nobody's cooperation to attack:
+
+| | |
+|---|---|
+| A non-creator rewriting the membership | Refused — every op is checked against the creator recorded at creation |
+| Somebody removing you and putting themselves in charge | Refused — the creator field cannot change |
+| A member forging somebody else's departure | Refused — a `left` op is only accepted from the person leaving, about themselves |
+| A leave that also drops other people | Refused — the resulting roster must be the old one minus exactly the leaver |
+| A contact who learned a group id posting into that thread | Refused — a group message is only filed once the authenticated sender is in our own copy of the membership |
+| A creator naming ten thousand members to amplify everyone's traffic | Capped at 32 |
+| A contact minting endless groups to fill your disk | Capped at 64 groups per creator, on this device |
+| An epoch set near `u64::MAX`, so that every later op wraps and nobody can leave | Refused — an op may not jump more than a million epochs ahead, and the increment saturates |
+| A group you left still filling up with what the others say | Refused — a thread you have left stops accepting |
+
+Group messages carry no separate group key. Each one is an ordinary sealed
+message per member device, so forward secrecy and post-compromise security are
+exactly what they are in a one-to-one conversation — there is no group session
+whose leak would expose a run of history.
+
 ### F. Someone who steals your device
 
 **Can:** read everything on it, if they can also read the database key.

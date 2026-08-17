@@ -13,6 +13,31 @@ each other.
 
 ### Added
 
+- **Groups.** A group is a name and a list of your contacts. A message to one is
+  an ordinary sealed message sent once to each member's device, over the same Olm
+  ratchet a one-to-one conversation uses — so a group carries no key of its own,
+  forward secrecy and post-compromise security hold per member, and there is
+  nothing to distribute, rotate or lose. The price is linear: a group of eight is
+  eight sends, which is also why groups are text only for now. Capped at 32
+  members, because every message multiplies by the roster.
+
+  Megolm and MLS were both considered and neither was adopted. Both assume a
+  delivery service that accepts one ciphertext and fans it out; there is none
+  here, so a group message is N envelopes whatever cipher sits inside them. See
+  the settled question in `.documentation/design.md`.
+
+  **Only whoever made a group may change who is in it**; anyone may leave. With
+  no server to order two admins' concurrent edits, one writer is the alternative
+  to inventing consensus. Every membership change carries the whole resulting
+  member list rather than a delta, so it is idempotent and order-tolerant: a
+  member who missed three changes and receives only the fourth ends up with
+  exactly the right roster. A member who is removed is told, rather than left to
+  work it out from silence.
+
+  A group id is a sender-chosen field, so it gets the treatment the conversation
+  field already gets: an incoming group message is filed under the group only
+  once the authenticated sender is found in our own copy of the membership.
+  Without that, any contact who learned an id could write into that thread.
 - **Files, up to 10 MB.** A file is sent as an announcement plus its bytes in
   96 KiB chunks, each an ordinary ratcheted, sealed message — so a relay cannot
   tell a file from a sentence, and files inherit the same encryption, routing and
@@ -93,6 +118,41 @@ each other.
   holds 32 envelopes for one recipient, and the rest waits in the sender's outbox
   until the recipient reappears. Those caps were deliberately not raised for
   files: every parked envelope is a volunteer's disk.
+- **Groups carry text only.** A file would be sent once per member device.
+- **A group's creator is trusted to describe it honestly.** Nothing stops them
+  telling two members two different member lists; there is no shared transcript
+  to compare, and building one without a server is the hard part of group
+  messaging rather than an omission. What *is* enforced is everything that needs
+  no cooperation — see `.documentation/threat-model.md`.
+- **A group member you have not exchanged invites with is unreachable.** You
+  cannot send to them and they will not see what you write, though they are in
+  the group and can read what the others send. The member list says so rather
+  than hiding them.
+
+### Fixed
+
+- **Three bounds the group code was missing**, found in a review of it:
+  a contact could mint groups without limit (now 64 per creator on this device,
+  the same reasoning as the caps on devices and members); a creator could set an
+  epoch near `u64::MAX`, after which every op anyone built wrapped around and
+  looked stale, leaving a group nobody could leave (an op may now not jump more
+  than a million epochs ahead, and the increment saturates); and a group you had
+  left went on accepting messages into its thread (it no longer does).
+- **`cargo audit` runs in CI**, with `.cargo/audit.toml` listing the advisories
+  that have been read and found not to apply, each with its reasoning. Anything
+  not listed fails the build. Two are listed today, both against `hickory-proto`
+  via libp2p — see [SECURITY.md](SECURITY.md).
+- **Two senders consumed the same one-time prekey.** A published bundle is a list
+  everybody who holds it sees identically, and `establish` took its first entry —
+  so two people opening a first session with the same third party both chose the
+  same key, and a one-time key is consumed by the first inbound session that uses
+  it. The second sender's message never opened, and the outbox retried it
+  forever. The key is now chosen by hashing the sender's account and the
+  recipient's device, which needs no coordination and spreads senders across the
+  bundle; two senders can still collide with probability one over the number of
+  published keys, which is the residual cost of having no server to allocate
+  them. Found while building groups, where one op fans out from several people to
+  the same recipient — but it affected one-to-one conversations just as much.
 
 ## [1.0.0] — 2026-08-16
 

@@ -59,6 +59,26 @@ entry says what it costs and what would fix it. Two worth repeating here:
   has been audited by Least Authority. The code around it has not been audited
   by anyone.
 
+### Advisories against dependencies
+
+`cargo audit` runs in CI and fails on anything not listed in
+[`.cargo/audit.toml`](.cargo/audit.toml). Two entries are there now, both
+against `hickory-proto 0.25.2`, which arrives through libp2p:
+
+- **RUSTSEC-2026-0118** — an unbounded loop in NSEC3 validation. **Not
+  reachable:** DNSSEC validation lives behind hickory's `dnssec` feature and
+  nothing in this tree enables it. There is no fixed version either way.
+- **RUSTSEC-2026-0119** — O(n²) name compression while encoding a DNS message,
+  a CPU exhaustion. Reachable through mDNS, which is tier 0 and therefore
+  limited to a hostile host on your local network; it costs CPU and denies
+  discovery rather than revealing anything. Fixed in hickory 0.26.1, but the
+  dependency is transitive through libp2p 0.56, which pins 0.25 — there is no
+  upgrade available from this repository. It goes when libp2p bumps.
+
+The remaining advisories are `unmaintained` and `unsound` notices against the
+GTK3 bindings Tauri's Linux webview pulls in. Nothing here chooses them and
+nothing can drop them without replacing Tauri's Linux backend.
+
 ## Supported versions
 
 Pre-1.0. Only the tip of `main` receives fixes. There is no long-term support

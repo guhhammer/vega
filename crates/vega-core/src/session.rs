@@ -84,16 +84,26 @@ impl Sessions {
 
     /// Open a session with a device we have never spoken to, consuming one of
     /// its published prekeys.
+    ///
+    /// **Which** prekey matters, and there is no server here to hand each sender
+    /// a different one. A published bundle is a list everybody holding it sees
+    /// identically, so if every sender took the first key, every sender would
+    /// take the *same* key — and a one-time key is consumed by the first inbound
+    /// session that opens with it. The second sender's message would then be
+    /// undecryptable forever, and the outbox would retry it forever.
+    ///
+    /// So the key is chosen by hashing who is asking. Deterministic, needs no
+    /// coordination, and spreads senders across the bundle instead of piling
+    /// them onto its first entry. Two senders can still collide — one chance in
+    /// however many keys are published — which is the residual cost of having no
+    /// server to allocate them.
     pub fn establish(
         &mut self,
         identity: &Identity,
         peer: &DeviceRecord,
         bundle: &PrekeyBundle,
     ) -> Result<()> {
-        let one_time = bundle
-            .one_time
-            .first()
-            .copied()
+        let one_time = pick_prekey(bundle, &identity.account_id, &peer.device_id)
             .or(bundle.fallback)
             .ok_or_else(|| Error::NoPrekeys(peer.device_id.short()))?;
 
@@ -255,6 +265,29 @@ impl Sessions {
     }
 }
 
+/// Which published one-time key this sender should take.
+///
+/// Domain-separated so the index cannot be confused with any other hash in the
+/// protocol, and keyed on the recipient device too — so a sender talking to two
+/// of somebody's devices does not land on the same index in both bundles for no
+/// reason.
+fn pick_prekey(bundle: &PrekeyBundle, from: &AccountId, to: &DeviceId) -> Option<DhKey> {
+    if bundle.one_time.is_empty() {
+        return None;
+    }
+    let mut h = blake3::Hasher::new();
+    h.update(b"vega:prekey-pick:v1");
+    h.update(from.as_bytes());
+    h.update(to.as_bytes());
+    let digest = h.finalize();
+
+    let mut eight = [0u8; 8];
+    eight.copy_from_slice(&digest.as_bytes()[..8]);
+    let index = usize::try_from(u64::from_le_bytes(eight) % bundle.one_time.len() as u64)
+        .unwrap_or_default();
+    bundle.one_time.get(index).copied()
+}
+
 /// The plaintext routing header, in the exact form both ends bind to the seal.
 fn routing_context(tag: &crate::tag::Tag, epoch: u64) -> Vec<u8> {
     let mut v = Vec::with_capacity(24);
@@ -363,6 +396,63 @@ pub fn fan_out(
         return Err(Error::UnknownContact(to.account.short()));
     }
     Ok(out)
+}
+
+/// One envelope per destination device, with the account each is bound for.
+///
+/// The account travels alongside because a group message goes to several people
+/// at once and the outbox routes on who each envelope is for.
+pub type Addressed = Vec<(AccountId, DeviceId, Envelope)>;
+
+/// Encrypt the *same* content to several accounts at once.
+///
+/// This is what a group message is. Unlike [`fan_out`] there is no self-copy
+/// rewriting: every recipient — including my own other devices, if my account is
+/// among them — receives the identical body, so everyone files it the same way
+/// and nobody has to reconstruct what was said from an echo of it.
+///
+/// This device is always skipped: it already has the message.
+///
+/// A recipient that cannot be reached (no prekeys published, no session and no
+/// way to open one) is reported rather than aborting the send. One unreachable
+/// member must not silence a group.
+pub fn fan_out_to(
+    identity: &mut Identity,
+    sessions: &mut Sessions,
+    to: &[Recipient<'_>],
+    content: &Content,
+    now: u64,
+) -> (Addressed, Vec<(AccountId, Error)>) {
+    let mut out: Addressed = Vec::new();
+    let mut failed = Vec::new();
+
+    for recipient in to {
+        for device in recipient.state.live_devices() {
+            if device.device_id == identity.device_id {
+                continue;
+            }
+            let attempt =
+                ensure_session(identity, sessions, recipient.state, device).and_then(|()| {
+                    sessions.encrypt_for(
+                        identity,
+                        device,
+                        &recipient.account,
+                        recipient.pairwise,
+                        content,
+                        now,
+                    )
+                });
+            match attempt {
+                // The account travels with the envelope: a group message goes
+                // to several people at once, and the outbox routes on who each
+                // one is for.
+                Ok(env) => out.push((recipient.account, device.device_id, env)),
+                Err(e) => failed.push((recipient.account, e)),
+            }
+        }
+    }
+
+    (out, failed)
 }
 
 fn ensure_session(
@@ -1132,5 +1222,128 @@ mod tests {
             a.identity.contact_public(),
             DhKey::from(XPublic::from(phone.contact_secret()))
         );
+    }
+
+    /// Two people who hold the same published bundle must not both take its
+    /// first one-time key.
+    ///
+    /// With no server to hand each sender a different key, everybody sees the
+    /// same list. If the choice were "the first one", the first message to
+    /// arrive would consume that key and the second sender's message would be
+    /// undecryptable forever — and the outbox would retry it forever. This is
+    /// the case that broke group sends, where one op fans out from several
+    /// people to the same recipient.
+    #[test]
+    fn two_senders_do_not_consume_the_same_one_time_key() {
+        let mut carol = Peer::new("carol");
+        let mut alice = Peer::new("alice");
+
+        let carol_state = carol.state();
+        let bundle = &carol_state.prekeys[&carol.identity.device_id];
+        let device = carol_state.device(&carol.identity.device_id).unwrap();
+
+        // Two senders *can* still land on the same key — one chance in however
+        // many are published, and that residual is the point of the doc comment
+        // on `establish`. It is not what this test is about, and a test that
+        // fails one run in twenty teaches people to re-run it, so the second
+        // sender here is one who demonstrably chose differently.
+        let mine = pick_prekey(bundle, &alice.identity.account_id, &device.device_id);
+        let mut bob = Peer::new("bob");
+        for _ in 0..64 {
+            if pick_prekey(bundle, &bob.identity.account_id, &device.device_id) != mine {
+                break;
+            }
+            bob = Peer::new("bob");
+        }
+        assert_ne!(
+            pick_prekey(bundle, &bob.identity.account_id, &device.device_id),
+            mine,
+            "could not find two senders picking different keys"
+        );
+
+        alice
+            .sessions
+            .establish(&alice.identity, device, bundle)
+            .unwrap();
+        bob.sessions
+            .establish(&bob.identity, device, bundle)
+            .unwrap();
+
+        let to_carol_from_alice = alice
+            .sessions
+            .encrypt_for(
+                &alice.identity,
+                device,
+                &carol.identity.account_id,
+                &alice.pairwise_with(&carol),
+                &text(&carol, "from alice"),
+                NOW,
+            )
+            .unwrap();
+        let to_carol_from_bob = bob
+            .sessions
+            .encrypt_for(
+                &bob.identity,
+                device,
+                &carol.identity.account_id,
+                &bob.pairwise_with(&carol),
+                &text(&carol, "from bob"),
+                NOW,
+            )
+            .unwrap();
+
+        let directory = TestDirectory(vec![alice.state(), bob.state(), carol.state()]);
+
+        // Alice's arrives first and consumes whichever key she chose.
+        let first = carol
+            .sessions
+            .decrypt(&mut carol.identity, &to_carol_from_alice, &directory)
+            .unwrap();
+        assert_eq!(first.content.text(), Some("from alice"));
+
+        // Bob's has to still open. Before the sender-derived pick it did not.
+        let second = carol
+            .sessions
+            .decrypt(&mut carol.identity, &to_carol_from_bob, &directory)
+            .expect("a second sender's first message must still open");
+        assert_eq!(second.content.text(), Some("from bob"));
+    }
+
+    #[test]
+    fn the_prekey_pick_is_stable_and_spread() {
+        let carol = Peer::new("carol");
+        let state = carol.state();
+        let bundle = &state.prekeys[&carol.identity.device_id];
+        let published = bundle.one_time.len();
+
+        // Both ends fixed, so nothing here depends on which identity the
+        // harness happened to generate. Two *particular* senders can collide
+        // legitimately — one chance in however many keys are published — so
+        // asserting on one pair would be asserting on a coin toss. The property
+        // that matters is the spread across many senders.
+        let device = DeviceId::from_raw([7u8; 32]);
+        let alice = AccountId::from_raw([1u8; 32]);
+
+        // Same sender, same answer: establishing twice must not walk the list.
+        assert_eq!(
+            pick_prekey(bundle, &alice, &device),
+            pick_prekey(bundle, &alice, &device)
+        );
+
+        // Piling every sender onto one key is the bug this function exists to
+        // prevent, so many senders have to reach most of the bundle.
+        let mut chosen: Vec<DhKey> = (0..64u8)
+            .filter_map(|n| pick_prekey(bundle, &AccountId::from_raw([n; 32]), &device))
+            .collect();
+        chosen.sort_unstable();
+        chosen.dedup();
+        assert!(
+            chosen.len() * 4 >= published * 3,
+            "64 senders reached only {} of {published} published keys",
+            chosen.len()
+        );
+
+        // An empty bundle is the fallback key's job, not this one's.
+        assert!(pick_prekey(&PrekeyBundle::default(), &alice, &device).is_none());
     }
 }

@@ -1,0 +1,27 @@
+# Advisories acknowledged rather than fixed, each with the reason.
+#
+# An entry here is a claim that the advisory has been read and does not apply,
+# or cannot be acted on from this repository. It is not a way to quiet the
+# tool: anything not listed fails CI.
+
+[advisories]
+ignore = [
+    # hickory-proto 0.25.2 — NSEC3 closest-encloser proof validation enters an
+    # unbounded loop. Not reachable: DNSSEC validation is behind hickory's
+    # `dnssec` feature, and nothing in this tree enables it (verify with
+    # `cargo tree -e features -i hickory-proto | grep dnssec`). There is also no
+    # fixed version to move to.
+    "RUSTSEC-2026-0118",
+
+    # hickory-proto 0.25.2 — O(n²) name compression during message encoding, a
+    # CPU exhaustion reachable from mDNS, which is tier 0 and therefore limited
+    # to a hostile host on the same local network. Fixed in hickory 0.26.1, but
+    # the dependency is transitive through libp2p 0.56, which pins 0.25 — there
+    # is no upgrade available from here. Revisit whenever libp2p bumps.
+    "RUSTSEC-2026-0119",
+]
+
+# Unmaintained and unsound advisories against the GTK3 bindings that Tauri's
+# Linux webview pulls in. Nothing in this repository chooses them and nothing
+# can replace them without replacing Tauri's Linux backend.
+informational_warnings = ["unmaintained", "unsound"]

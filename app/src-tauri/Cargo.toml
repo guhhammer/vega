@@ -19,6 +19,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 vega-core.workspace = true
 vega-net.workspace = true
+vega-android.workspace = true
 
 tauri = { version = "2", features = [] }
 
